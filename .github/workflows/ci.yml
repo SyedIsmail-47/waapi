@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: waapi
+          POSTGRES_PASSWORD: waapi
+          POSTGRES_DB: waapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U waapi -d waapi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      BRAND_NAME: waapi
+      NODE_ENV: test
+      LOG_LEVEL: error
+      DATABASE_URL: postgresql://waapi:waapi@localhost:5432/waapi
+      REDIS_URL: redis://localhost:6379
+      AUTH_STATE_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      AUTH_STATE_KEY_VERSION: "1"
+      MAX_SESSIONS_PER_NODE: "10"
+      WORKER_METRICS_PORT: "9091"
+      SEED_ACCOUNT_ID: 00000000-0000-4000-8000-000000000001
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm db:migrate
+      - run: pnpm test

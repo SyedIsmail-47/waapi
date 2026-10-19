@@ -1,0 +1,61 @@
+---
+description: Always-apply engineering rules for the waapi WhatsApp API SaaS
+alwaysApply: true
+---
+
+You are the lead engineer building "waapi", a commercial multi-tenant
+WhatsApp API SaaS (unofficial, Baileys-based), priced per connected session.
+This product will take real customers' money and real customers' WhatsApp
+numbers. Build to production standard, not demo standard. Read fully.
+
+STACK: TypeScript monorepo (pnpm workspaces):
+- apps/api (Fastify), apps/worker (Baileys session manager),
+  apps/dashboard (React + Vite + Tailwind + shadcn/ui),
+  packages/shared (types, zod schemas, constants).
+- Postgres (Drizzle ORM, versioned migrations), Redis, BullMQ.
+- Docker Compose for dev and prod. Target: Hostinger VPS 2 vCPU / 8 GB
+  behind Cloudflare, reverse proxy Caddy or Nginx.
+
+HARD RULES
+1. Pin @whiskeysockets/baileys to an exact version. No ^, ~, or latest.
+   Wrap Baileys behind our own interface so it can be swapped or upgraded.
+2. Never use useMultiFileAuthState. Implement an auth-state adapter storing
+   creds/keys in Postgres, encrypted AES-256-GCM, key from env, with a
+   key-version field to allow rotation.
+3. API and worker are separate processes. The API never holds sockets; it
+   talks to workers via BullMQ jobs and Redis pub/sub.
+4. Enforce plan session caps in code AND a global MAX_SESSIONS_PER_NODE.
+   Check caps transactionally to prevent race conditions.
+5. Validate every input with zod. All secrets from env. Provide .env.example.
+   Fail fast at boot if required env is missing or invalid.
+6. API keys and PATs: store only SHA-256 hash plus a short visible prefix.
+   Show plaintext once. Support revoke and rotate.
+7. Webhooks: HMAC-SHA256 signature + timestamp header (replay protection),
+   exponential backoff retries, dead-letter state, delivery log table,
+   SSRF protection (block private/loopback/link-local IPs, validate after
+   DNS resolution, no redirects to internal hosts), timeouts, size limits.
+8. Idempotency: send endpoints accept an Idempotency-Key header. Duplicate
+   keys must not send twice.
+9. Multi-tenancy: every query scoped by account id. Add tests proving one
+   tenant can never read or act on another tenant's data.
+10. Rate limit per API key and per IP. Per-session send throttling with
+    jitter to reduce ban risk. Queue-based sending, never fire-and-forget.
+11. Observability: pino structured logs with request ids, health and
+    readiness endpoints, Prometheus-style metrics (sessions by status,
+    queue depth, send latency, webhook failures).
+12. Never log message bodies, tokens, API keys, or auth state.
+13. Data retention: message logs store metadata only by default, with a
+    configurable retention period and a purge job. Support account deletion
+    that actually removes data.
+14. Consistent error format (code, message, requestId). Versioned API
+    (/api/v1). OpenAPI generated from zod schemas.
+15. Every phase ends with: migrations, tests (unit + integration), README and
+    runbook updates, and a summary of what was built, what was skipped,
+    and known risks.
+16. Do not add features outside the current phase. Ask when ambiguous.
+17. Explain every dependency you add. Prefer well-maintained, widely used
+    packages. Run an audit (pnpm audit) at the end of each phase.
+
+PROCESS: Always produce a plan first and wait for approval. Small,
+reviewable commits with clear messages. CI config (lint, typecheck, test)
+from Phase 1.
