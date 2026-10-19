@@ -13,7 +13,10 @@ describe("session caps", () => {
   const accountId = randomUUID();
 
   beforeAll(async () => {
-    if (!process.env.DATABASE_URL) return;
+    if (!process.env.DATABASE_URL) {
+      if (process.env.CI) throw new Error("DATABASE_URL required in CI");
+      return;
+    }
     process.env.BRAND_NAME ??= "waapi";
     process.env.AUTH_STATE_ENCRYPTION_KEY ??= Buffer.alloc(32, 2).toString("base64");
     process.env.REDIS_URL ??= "redis://localhost:6379";
@@ -26,7 +29,8 @@ describe("session caps", () => {
       await db.execute(sql`select 1`);
       await db.insert(accounts).values({ id: accountId, name: "cap", maxSessions: 1 });
       enabled = true;
-    } catch {
+    } catch (err) {
+      if (process.env.CI) throw err;
       enabled = false;
     }
   });
@@ -69,5 +73,35 @@ describe("session caps", () => {
       }),
     ).rejects.toThrow("NODE_SESSION_CAP");
     await db.delete(accounts).where(eq(accounts.id, other));
+  });
+
+  it("enforces account cap under Promise.all concurrency", async () => {
+    if (!enabled) return;
+    const concurrentAccount = randomUUID();
+    await db.insert(accounts).values({
+      id: concurrentAccount,
+      name: "concurrent-cap",
+      maxSessions: 2,
+    });
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, (_, i) =>
+        createSessionTransactional(db, {
+          accountId: concurrentAccount,
+          name: `c-${i}`,
+          maxSessionsPerNode: 100,
+          currentNodeSessionCount: 0,
+        }),
+      ),
+    );
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled.length).toBe(2);
+    expect(rejected.length).toBe(6);
+    for (const r of rejected) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(Error);
+      expect(((r as PromiseRejectedResult).reason as Error).message).toBe("ACCOUNT_SESSION_CAP");
+    }
+    await db.delete(sessions).where(eq(sessions.accountId, concurrentAccount));
+    await db.delete(accounts).where(eq(accounts.id, concurrentAccount));
   });
 });

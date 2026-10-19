@@ -1,5 +1,4 @@
 import makeWASocket, {
-  DisconnectReason,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
   type WASocket,
@@ -10,8 +9,9 @@ import type { SessionStatus } from "@waapi/shared";
 import type { WorkerConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import type { Logger } from "../logger.js";
-import { usePostgresAuthState } from "./auth-state.js";
-import type { WAClient, WAClientEvents } from "./types.js";
+import { mapDisconnectReason } from "../session/disconnect-reason.js";
+import { usePostgresAuthState, type PostgresAuthState } from "./auth-state.js";
+import type { StatusDetail, WAClient, WAClientEvents } from "./types.js";
 
 type AnyListener = (...args: never[]) => void;
 
@@ -33,6 +33,9 @@ export async function createBaileysClient(args: {
   let status: SessionStatus = "connecting";
   let sock: WASocket | null = null;
   let closedByUs = false;
+  let auth: PostgresAuthState | null = null;
+  /** Ensures a single logout path: loggedOut event only (no status=logged_out emit). */
+  let logoutEmitted = false;
 
   const emit = <K extends keyof WAClientEvents>(
     event: K,
@@ -45,29 +48,37 @@ export async function createBaileysClient(args: {
     }
   };
 
-  const setStatus = (
-    next: SessionStatus,
-    detail?: { error?: string; phoneNumber?: string },
-  ) => {
+  const setStatus = (next: SessionStatus, detail?: StatusDetail) => {
     status = next;
     emit("status", next, detail);
   };
 
-  const { state, saveCreds } = await usePostgresAuthState({
+  auth = await usePostgresAuthState({
     db,
     sessionId,
     accountId,
-    encryptionKey: cfg.authStateEncryptionKey,
-    keyVersion: cfg.authStateKeyVersion,
+    keyRing: cfg.keyRing,
   });
+
+  const detachSocket = () => {
+    if (!sock) return;
+    try {
+      sock.ev.removeAllListeners("creds.update");
+      sock.ev.removeAllListeners("connection.update");
+      sock.ev.removeAllListeners("messages.upsert");
+    } catch {
+      /* ignore */
+    }
+  };
 
   const connect = async (): Promise<void> => {
     closedByUs = false;
+    logoutEmitted = false;
     setStatus("connecting");
     const { version } = await fetchLatestBaileysVersion();
     sock = makeWASocket({
       version,
-      auth: state,
+      auth: auth!.state,
       printQRInTerminal: false,
       logger: pino({ level: "silent" }),
       syncFullHistory: false,
@@ -75,8 +86,12 @@ export async function createBaileysClient(args: {
       getMessage: async () => undefined,
     });
 
-    sock.ev.on("creds.update", async () => {
-      await saveCreds();
+    sock.ev.on("creds.update", () => {
+      void auth!
+        .saveCreds()
+        .catch((err) => {
+          log.error({ err, sessionId }, "saveCreds failed");
+        });
     });
 
     sock.ev.on("connection.update", (update) => {
@@ -94,23 +109,36 @@ export async function createBaileysClient(args: {
       }
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
-        const loggedOut = statusCode === DisconnectReason.loggedOut;
         if (closedByUs) {
-          setStatus("disconnected");
+          setStatus("disconnected", { reconnect: "none" });
           return;
         }
-        if (loggedOut) {
-          emit("loggedOut");
-          setStatus("logged_out");
+        const action = mapDisconnectReason(statusCode);
+        const errMsg = lastDisconnect?.error?.message ?? "connection closed";
+        if (action.kind === "logged_out") {
+          // Single logout path: emit loggedOut once; manager handles DB wipe/status.
+          // Do NOT also emit status "logged_out" (avoids dual handlers).
+          if (!logoutEmitted) {
+            logoutEmitted = true;
+            emit("loggedOut");
+          }
+          status = "logged_out";
           return;
         }
-        setStatus("disconnected", {
-          error: lastDisconnect?.error?.message ?? "connection closed",
-        });
+        if (action.kind === "reconnect_immediate") {
+          setStatus("disconnected", { error: errMsg, reconnect: "immediate" });
+          return;
+        }
+        if (action.kind === "stop_error") {
+          setStatus("error", { error: action.reason, reconnect: "none" });
+          return;
+        }
+        setStatus("disconnected", { error: errMsg, reconnect: "backoff" });
       }
     });
 
     sock.ev.on("messages.upsert", (upsert) => {
+      if (upsert.type !== "notify") return;
       for (const msg of upsert.messages) {
         const remoteJid = msg.key.remoteJid;
         const messageId = msg.key.id;
@@ -143,15 +171,56 @@ export async function createBaileysClient(args: {
     async connect() {
       await connect();
     },
-    async disconnect() {
+    async flushAuth() {
+      if (!auth) return;
+      await auth.flush();
+    },
+    async disconnect(opts?: { flush?: boolean }) {
       closedByUs = true;
+      const shouldFlush = opts?.flush !== false;
+      if (shouldFlush && auth) {
+        // Flush with 5s timeout; on timeout log warning and continue closing.
+        const FLUSH_TIMEOUT_MS = 5_000;
+        try {
+          let timedOut = false;
+          await Promise.race([
+            auth.flush(),
+            new Promise<void>((resolve) => {
+              setTimeout(() => {
+                timedOut = true;
+                resolve();
+              }, FLUSH_TIMEOUT_MS);
+            }),
+          ]);
+          if (timedOut) {
+            log.warn({ sessionId, timeoutMs: FLUSH_TIMEOUT_MS }, "auth flush timed out on disconnect");
+          }
+        } catch (err) {
+          log.error({ err, sessionId }, "auth flush on disconnect failed");
+        }
+      }
+      detachSocket();
       try {
         sock?.end(undefined);
       } catch {
         /* ignore */
       }
       sock = null;
-      setStatus("disconnected");
+      setStatus("disconnected", { reconnect: "none" });
+    },
+    closeAuth() {
+      auth?.close();
+    },
+    dispose() {
+      auth?.close();
+      detachSocket();
+      try {
+        sock?.end(undefined);
+      } catch {
+        /* ignore */
+      }
+      sock = null;
+      listeners.clear();
     },
     async sendText(jid, text) {
       if (!sock || status !== "connected") {

@@ -3,6 +3,7 @@ import {
   boolean,
   integer,
   customType,
+  index,
   pgTable,
   text,
   timestamp,
@@ -24,20 +25,26 @@ export const accounts = pgTable("accounts", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const sessions = pgTable("sessions", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  accountId: uuid("account_id")
-    .notNull()
-    .references(() => accounts.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  status: text("status", { enum: SESSION_STATUSES }).notNull().default("need_scan"),
-  phoneNumber: text("phone_number"),
-  lastError: text("last_error"),
-  authKeyVersion: integer("auth_key_version").notNull().default(1),
-  lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    status: text("status", { enum: SESSION_STATUSES }).notNull().default("need_scan"),
+    phoneNumber: text("phone_number"),
+    lastError: text("last_error"),
+    authKeyVersion: integer("auth_key_version").notNull().default(1),
+    lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountIdIdx: index("sessions_account_id_idx").on(t.accountId),
+  }),
+);
 
 export const waAuthCreds = pgTable("wa_auth_creds", {
   sessionId: uuid("session_id")
@@ -74,21 +81,32 @@ export const waAuthKeys = pgTable(
   }),
 );
 
-export const messageLogs = pgTable("message_logs", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  accountId: uuid("account_id")
-    .notNull()
-    .references(() => accounts.id, { onDelete: "cascade" }),
-  sessionId: uuid("session_id")
-    .notNull()
-    .references(() => sessions.id, { onDelete: "cascade" }),
-  direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
-  remoteJid: text("remote_jid").notNull(),
-  messageId: text("message_id").notNull(),
-  fromMe: boolean("from_me").notNull(),
-  messageType: text("message_type").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const messageLogs = pgTable(
+  "message_logs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
+    remoteJid: text("remote_jid").notNull(),
+    messageId: text("message_id").notNull(),
+    fromMe: boolean("from_me").notNull(),
+    messageType: text("message_type").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sessionMsgFromUnique: uniqueIndex("message_logs_session_msg_from_uidx").on(
+      t.sessionId,
+      t.messageId,
+      t.fromMe,
+    ),
+    sessionCreatedIdx: index("message_logs_session_created_idx").on(t.sessionId, t.createdAt),
+  }),
+);
 
 export const accountsRelations = relations(accounts, ({ many }) => ({
   sessions: many(sessions),

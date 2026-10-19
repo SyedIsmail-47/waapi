@@ -15,7 +15,10 @@ describe("tenant isolation", () => {
   let sessionA: string;
 
   beforeAll(async () => {
-    if (!process.env.DATABASE_URL) return;
+    if (!process.env.DATABASE_URL) {
+      if (process.env.CI) throw new Error("DATABASE_URL required in CI");
+      return;
+    }
     process.env.BRAND_NAME ??= "waapi";
     process.env.AUTH_STATE_ENCRYPTION_KEY ??= Buffer.alloc(32, 1).toString("base64");
     process.env.REDIS_URL ??= "redis://localhost:6379";
@@ -36,7 +39,8 @@ describe("tenant isolation", () => {
         .returning();
       sessionA = row!.id;
       enabled = true;
-    } catch {
+    } catch (err) {
+      if (process.env.CI) throw err;
       enabled = false;
     }
   });

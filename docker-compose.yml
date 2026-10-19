@@ -29,6 +29,27 @@ services:
       timeout: 5s
       retries: 10
 
+  # Local/dev still uses `pnpm dev:worker`. This service documents graceful stop
+  # (stop_grace_period 30s) for compose-based deploys: `docker compose --profile worker up`.
+  worker:
+    profiles: ["worker"]
+    image: node:20-bookworm-slim
+    working_dir: /app
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://waapi:waapi@postgres:5432/waapi
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - .:/app
+    command: ["pnpm", "--filter", "@waapi/worker", "dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   waapi_pg:
   waapi_redis:

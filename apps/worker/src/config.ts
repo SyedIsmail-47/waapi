@@ -1,4 +1,5 @@
 import { config as loadDotenv } from "dotenv";
+import { hostname } from "node:os";
 import { z } from "zod";
 import {
   BRAND_NAME_ENV,
@@ -7,17 +8,10 @@ import {
 } from "@waapi/shared";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildKeyRing, type EncryptionKeyRing } from "./crypto/key-ring.js";
 
 const rootDir = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..");
 loadDotenv({ path: resolve(rootDir, ".env") });
-
-function parseEncryptionKey(raw: string): Buffer {
-  const buf = Buffer.from(raw, "base64");
-  if (buf.length !== 32) {
-    throw new Error("AUTH_STATE_ENCRYPTION_KEY must be 32 bytes (base64-encoded)");
-  }
-  return buf;
-}
 
 const envSchema = z.object({
   BRAND_NAME: z.string().min(1),
@@ -27,10 +21,15 @@ const envSchema = z.object({
   REDIS_URL: z.string().min(1),
   AUTH_STATE_ENCRYPTION_KEY: z.string().min(1),
   AUTH_STATE_KEY_VERSION: z.coerce.number().int().positive().default(1),
+  /** Optional JSON map of version -> base64 or 64-char hex key for decrypting older rows. */
+  AUTH_STATE_KEY_RING: z.string().optional(),
   MAX_SESSIONS_PER_NODE: z.coerce.number().int().positive().default(DEFAULT_MAX_SESSIONS_PER_NODE),
   WORKER_METRICS_PORT: z.coerce.number().int().positive().default(9091),
   SEED_ACCOUNT_ID: z.string().uuid().default(DEFAULT_SEED_ACCOUNT_ID),
   MESSAGE_LOG_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+  BOOT_CONNECT_STAGGER_MS: z.coerce.number().int().nonnegative().default(500),
+  SESSION_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
+  WORKER_ID: z.string().min(1).optional(),
 });
 
 export type WorkerConfig = {
@@ -39,12 +38,15 @@ export type WorkerConfig = {
   logLevel: string;
   databaseUrl: string;
   redisUrl: string;
-  authStateEncryptionKey: Buffer;
+  keyRing: EncryptionKeyRing;
   authStateKeyVersion: number;
   maxSessionsPerNode: number;
   workerMetricsPort: number;
   seedAccountId: string;
   messageLogRetentionDays: number;
+  bootConnectStaggerMs: number;
+  sessionLeaseTtlMs: number;
+  workerId: string;
 };
 
 let cached: WorkerConfig | null = null;
@@ -59,18 +61,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     const msg = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new Error(`Invalid environment: ${msg}`);
   }
+  const keyRing = buildKeyRing({
+    currentVersion: parsed.data.AUTH_STATE_KEY_VERSION,
+    currentKeyRaw: parsed.data.AUTH_STATE_ENCRYPTION_KEY,
+    ringJson: parsed.data.AUTH_STATE_KEY_RING,
+  });
   const cfg: WorkerConfig = {
     brandName: parsed.data.BRAND_NAME,
     nodeEnv: parsed.data.NODE_ENV,
     logLevel: parsed.data.LOG_LEVEL,
     databaseUrl: parsed.data.DATABASE_URL,
     redisUrl: parsed.data.REDIS_URL,
-    authStateEncryptionKey: parseEncryptionKey(parsed.data.AUTH_STATE_ENCRYPTION_KEY),
+    keyRing,
     authStateKeyVersion: parsed.data.AUTH_STATE_KEY_VERSION,
     maxSessionsPerNode: parsed.data.MAX_SESSIONS_PER_NODE,
     workerMetricsPort: parsed.data.WORKER_METRICS_PORT,
     seedAccountId: parsed.data.SEED_ACCOUNT_ID,
     messageLogRetentionDays: parsed.data.MESSAGE_LOG_RETENTION_DAYS,
+    bootConnectStaggerMs: parsed.data.BOOT_CONNECT_STAGGER_MS,
+    sessionLeaseTtlMs: parsed.data.SESSION_LEASE_TTL_MS,
+    // Stable across restarts: explicit WORKER_ID, else hostname (not a random UUID).
+    workerId: parsed.data.WORKER_ID ?? hostname(),
   };
   if (env === process.env) cached = cfg;
   return cfg;

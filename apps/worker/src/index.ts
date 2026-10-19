@@ -6,14 +6,32 @@ import { createLogger } from "./logger.js";
 import { SessionMetrics } from "./metrics.js";
 import { subscribeWorkerCommands } from "./redis/commands.js";
 import { createRedis } from "./redis/pubsub.js";
+import { NodeLock } from "./redis/node-lock.js";
 import { SessionManager } from "./session/manager.js";
 import { installShutdownHandlers } from "./shutdown.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const log = createLogger(cfg);
+
+  process.on("unhandledRejection", (reason) => {
+    log.error({ err: reason }, "unhandledRejection");
+  });
+  process.on("uncaughtException", (err) => {
+    log.fatal({ err }, "uncaughtException");
+  });
+
   const { db, client } = createDb(cfg.databaseUrl);
   const redis = createRedis(cfg.redisUrl);
+
+  // Refuse two live workers with the same WORKER_ID.
+  const nodeLock = new NodeLock(redis, cfg.workerId, cfg.sessionLeaseTtlMs);
+  await nodeLock.acquire();
+  log.info(
+    { workerId: cfg.workerId, bootId: nodeLock.bootId, nodeLockTtlMs: cfg.sessionLeaseTtlMs },
+    "node lock acquired",
+  );
+
   const metrics = new SessionMetrics();
   const metricsServer = metrics.startServer(cfg.workerMetricsPort);
 
@@ -42,6 +60,8 @@ async function main(): Promise<void> {
       brand: cfg.brandName,
       maxSessionsPerNode: cfg.maxSessionsPerNode,
       metricsPort: cfg.workerMetricsPort,
+      workerId: cfg.workerId,
+      bootConnectStaggerMs: cfg.bootConnectStaggerMs,
     },
     "worker started",
   );
@@ -51,6 +71,7 @@ async function main(): Promise<void> {
     onShutdown: async () => {
       await sendWorker.close();
       await manager.shutdown();
+      await nodeLock.release();
       metricsServer.close();
       await redis.quit();
       await client.end({ timeout: 5 });

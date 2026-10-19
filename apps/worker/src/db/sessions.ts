@@ -1,14 +1,17 @@
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { SessionStatus } from "@waapi/shared";
 import type { Db } from "./client.js";
-import { accounts, sessions } from "./schema.js";
+import { accounts, sessions, waAuthCreds, waAuthKeys } from "./schema.js";
 
-const ACTIVE_STATUSES: SessionStatus[] = [
+/**
+ * Statuses eligible for boot reload.
+ * Excludes terminal `logged_out` and permanent `error` (no auto-reload).
+ */
+const BOOT_LOAD_STATUSES: SessionStatus[] = [
   "need_scan",
   "connecting",
   "connected",
   "disconnected",
-  "error",
 ];
 
 export async function getSessionForAccount(
@@ -83,6 +86,10 @@ export async function createSessionTransactional(
   });
 }
 
+/**
+ * Update session status. Never overwrites a terminal `logged_out` row
+ * (returns null if the session is already logged_out).
+ */
 export async function updateSessionStatus(
   db: Db["db"],
   accountId: string,
@@ -99,21 +106,72 @@ export async function updateSessionStatus(
       lastConnectedAt: status === "connected" ? new Date() : undefined,
       updatedAt: new Date(),
     })
-    .where(and(eq(sessions.id, sessionId), eq(sessions.accountId, accountId)))
+    .where(
+      and(
+        eq(sessions.id, sessionId),
+        eq(sessions.accountId, accountId),
+        ne(sessions.status, "logged_out"),
+      ),
+    )
     .returning();
   return row ?? null;
 }
 
+/** Prefer crash-recovery of connecting/connected. Excludes `error` and `logged_out`. */
 export async function listSessionsToLoad(db: Db["db"], limit: number) {
   return db
     .select()
     .from(sessions)
-    .where(inArray(sessions.status, ACTIVE_STATUSES))
+    .where(inArray(sessions.status, BOOT_LOAD_STATUSES))
+    .orderBy(
+      sql`case when ${sessions.status} in ('connecting','connected') then 0 else 1 end`,
+      asc(sessions.updatedAt),
+    )
     .limit(limit);
 }
 
 export async function wipeAuthForSession(db: Db["db"], sessionId: string): Promise<void> {
-  const { waAuthCreds, waAuthKeys } = await import("./schema.js");
   await db.delete(waAuthKeys).where(eq(waAuthKeys.sessionId, sessionId));
   await db.delete(waAuthCreds).where(eq(waAuthCreds.sessionId, sessionId));
+}
+
+/** Wipe auth + set logged_out in a single transaction. */
+export async function markLoggedOutAndWipeAuth(
+  db: Db["db"],
+  accountId: string,
+  sessionId: string,
+) {
+  return db.transaction(async (tx) => {
+    await tx.delete(waAuthKeys).where(eq(waAuthKeys.sessionId, sessionId));
+    await tx.delete(waAuthCreds).where(eq(waAuthCreds.sessionId, sessionId));
+    const [row] = await tx
+      .update(sessions)
+      .set({
+        status: "logged_out",
+        lastError: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(sessions.id, sessionId),
+          eq(sessions.accountId, accountId),
+          ne(sessions.status, "logged_out"),
+        ),
+      )
+      .returning();
+    return row ?? null;
+  });
+}
+
+/** Boot sweep: delete orphaned auth rows for any session already logged_out. */
+export async function sweepAuthForLoggedOutSessions(db: Db["db"]): Promise<number> {
+  const loggedOut = await db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(eq(sessions.status, "logged_out"));
+  if (loggedOut.length === 0) return 0;
+  const ids = loggedOut.map((r) => r.id);
+  await db.delete(waAuthKeys).where(inArray(waAuthKeys.sessionId, ids));
+  await db.delete(waAuthCreds).where(inArray(waAuthCreds.sessionId, ids));
+  return ids.length;
 }

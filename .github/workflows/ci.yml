@@ -57,4 +57,5 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm db:migrate
+      # Integration tests hit real Postgres + Redis service containers (CI=true fails if unreachable)
       - run: pnpm test

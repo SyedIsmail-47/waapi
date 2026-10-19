@@ -13,8 +13,14 @@ export type MessageLogInsert = {
 };
 
 export async function insertMessageLog(db: Db["db"], row: MessageLogInsert) {
-  const [created] = await db.insert(messageLogs).values(row).returning();
-  return created!;
+  const [created] = await db
+    .insert(messageLogs)
+    .values(row)
+    .onConflictDoNothing({
+      target: [messageLogs.sessionId, messageLogs.messageId, messageLogs.fromMe],
+    })
+    .returning();
+  return created ?? null;
 }
 
 export async function listMessageLogsForAccount(

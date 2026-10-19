@@ -31,14 +31,42 @@ pnpm ram-probe
 ## Manual acceptance checks
 
 1. **Restart without rescan** — create session, scan QR, stop worker, start worker; status stays `connected`.
-2. **Send/receive** — CLI send + reply from phone; `message_logs` has metadata only.
-3. **Network drop** — disable network briefly; session `disconnected` then reconnects with backoff.
-4. **Phone logout** — unlink device; status `logged_out`; `wa_auth_*` rows wiped.
+2. **Send/receive** — CLI send + reply from phone; `message_logs` has metadata only (`notify` upserts).
+3. **Network drop** — disable network briefly; session `disconnected` then reconnects with backoff + jitter.
+4. **Phone logout** — unlink device; status `logged_out`; `wa_auth_*` rows wiped; no reconnect timer.
 5. **Logs** — no message bodies, tokens, or auth state.
+6. **kill -9 worker recovery** — with a `connected` session, `kill -9` the worker PID, restart worker; session reloads (staggered) under a Redis lease (`waapi:lease:<sessionId>`), status returns to `connected` without QR rescan.
+7. **440 connectionReplaced** — open the same WhatsApp account in another client/device so Baileys gets status `440`; worker must stop reconnect, mark session `error` with reason `connection_replaced`, and not thrash reconnect.
+8. **Node cap enforcement** — set `MAX_SESSIONS_PER_NODE=1`, create/open a second session on the same worker; expect `NODE_SESSION_CAP` and no additional live socket.
+9. **RAM probe table** — run `pnpm ram-probe` (or equivalent) and record RSS:
+
+| Connected sessions | Worker RSS (approx) | Notes |
+|---|---|---|
+| 1 | | fill after probe |
+| 3 | | |
+| 5 | | |
+| 10 | | |
+
+Use the table to set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling often ~8–20 depending on VPS RAM).
 
 ## RAM / caps
 
-Run `pnpm ram-probe` and compare worker RSS with 0 vs 1 connected session. Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling ~8–20).
+Run `pnpm ram-probe` and fill the table above. Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.
+
+## Worker node lock (`WORKER_ID`)
+
+On boot the worker takes Redis key `waapi:node:<WORKER_ID>` with a random `bootId` and renews it for the process lifetime (`SESSION_LEASE_TTL_MS`, default **30s**).
+
+- Two live processes with the same `WORKER_ID` → second boot fails with `NODE_LOCK_HELD`.
+- After `kill -9` / crash, the lock is **not** released; wait up to the TTL (**max wait = `SESSION_LEASE_TTL_MS`**, default 30s) for expiry, then restart — or set a unique `WORKER_ID`.
+- Compose worker service uses `stop_grace_period: 30s` so graceful shutdown (flush → close, parallel dispose capped at 25s) can finish before SIGKILL.
+
+### Dispose order
+
+| Path | Order |
+|---|---|
+| Normal shutdown | `disconnect({ flush: true })` (flush ≤5s) → `dispose` → release session lease → release node lock |
+| Logout (401) | `closeAuth` → wipe+`logged_out` (one txn) → `disconnect({ flush: false })` → `dispose` → release lease |
 
 ## Failure modes
 
@@ -46,8 +74,11 @@ Run `pnpm ram-probe` and compare worker RSS with 0 vs 1 connected session. Set `
 |---|---|
 | Redis down | Worker/jobs fail; restore Redis |
 | Postgres down | Boot/migrate fails; restore DB |
-| Worker crash | Restart process; sessions reload from encrypted auth |
-| WhatsApp logout | Status `logged_out`; re-scan required |
+| Worker crash (`kill -9`) | Restart process; wait ≤ node-lock TTL if same `WORKER_ID`; sessions reload with stagger + Redis lease |
+| Duplicate `WORKER_ID` (live) | Boot refuses with `NODE_LOCK_HELD` |
+| 440 connection replaced | Status `error` / `connection_replaced`; no reconnect loop |
+| WhatsApp logout (401) | Status `logged_out`; auth wiped; no reconnect timer |
+| Node session cap | `NODE_SESSION_CAP`; no extra live client |
 
 ## Phase 1 summary
 
