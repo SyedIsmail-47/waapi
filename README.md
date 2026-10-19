@@ -40,8 +40,13 @@ pnpm ram-probe
 
 All scripts are cross-platform (`tsx` / `node`). No bash-only package scripts.
 
+## Phase 1 status
+
+Session engine is implemented in `apps/worker`. API and dashboard are stubs until later phases.
+
+See [docs/runbook.md](docs/runbook.md) for acceptance checks, RAM probing, and the Phase 1 build summary.
+
 ## Deploy notes
 
 Target: Hostinger VPS behind Cloudflare. Reverse proxy (Caddy/Nginx) is documented for later ops; local Phase 1 uses Compose for Postgres/Redis only.
 
-See [docs/runbook.md](docs/runbook.md).

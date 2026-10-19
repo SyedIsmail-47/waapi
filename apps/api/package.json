@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@waapi/shared": "workspace:*",
-    "fastify": "5.2.0"
+    "fastify": "5.12.5"
   },
   "devDependencies": {
     "tsx": "4.19.2",

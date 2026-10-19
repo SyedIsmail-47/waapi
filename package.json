@@ -12,8 +12,9 @@
     "dev:api": "pnpm --filter @waapi/api dev",
     "dev:dashboard": "pnpm --filter @waapi/dashboard dev",
     "lint": "eslint .",
-    "typecheck": "pnpm -r run typecheck",
+    "typecheck": "pnpm --filter @waapi/shared build && pnpm -r run typecheck",
     "test": "vitest run",
+    "pretest": "pnpm --filter @waapi/shared build",
     "test:watch": "vitest",
     "format": "prettier --write .",
     "db:generate": "pnpm --filter @waapi/worker db:generate",
@@ -24,13 +25,21 @@
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down"
   },
+  "dependencies": {
+    "@waapi/shared": "workspace:*"
+  },
   "devDependencies": {
     "@eslint/js": "9.17.0",
     "@types/node": "22.10.2",
+    "bullmq": "5.58.5",
     "dotenv": "16.4.7",
+    "drizzle-orm": "0.45.2",
     "eslint": "9.17.0",
     "eslint-config-prettier": "9.1.0",
+    "ioredis": "5.4.2",
+    "postgres": "3.4.5",
     "prettier": "3.4.2",
+    "qrcode-terminal": "0.12.0",
     "tsx": "4.19.2",
     "typescript": "5.7.2",
     "typescript-eslint": "8.18.1",
