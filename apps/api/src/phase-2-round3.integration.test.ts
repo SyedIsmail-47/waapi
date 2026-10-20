@@ -358,8 +358,8 @@ describe("Phase 2 round 3", () => {
           url.includes("/refresh") || url.includes("/verify-email") ||
           url.includes("/resend-verification") || url.includes("/forgot-password") ||
           url.includes("/reset-password")) {
-        // Public auth routes — invalid body/token → 400/401; some drivers surface 500 on junk input
-        return [400, 401, 202, 204, 201, 200, 403, 500];
+        // Public auth routes — invalid body/token → 400/401 (never 5xx)
+        return [400, 401, 202, 204, 201, 200, 403, 429];
       }
       if (mode === "none") return 401;
       if (url.startsWith("/api/v1/auth/tokens") || url.includes("/logout-all")) {
@@ -447,6 +447,10 @@ describe("Phase 2 round 3", () => {
           headers,
           payload,
         });
+        expect(
+          res.statusCode,
+          `${route.method} ${route.url} mode=${mode} unexpected 5xx`,
+        ).toBeLessThan(500);
         const expected = expectStatus(route.method, route.url, mode);
         const ok = Array.isArray(expected)
           ? expected.includes(res.statusCode)
