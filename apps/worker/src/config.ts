@@ -30,6 +30,7 @@ const envSchema = z.object({
   BOOT_CONNECT_STAGGER_MS: z.coerce.number().int().nonnegative().default(500),
   SESSION_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
   WORKER_ID: z.string().min(1).optional(),
+  SEND_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(800),
 });
 
 export type WorkerConfig = {
@@ -47,6 +48,7 @@ export type WorkerConfig = {
   bootConnectStaggerMs: number;
   sessionLeaseTtlMs: number;
   workerId: string;
+  sendMinIntervalMs: number;
 };
 
 let cached: WorkerConfig | null = null;
@@ -82,6 +84,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     sessionLeaseTtlMs: parsed.data.SESSION_LEASE_TTL_MS,
     // Stable across restarts: explicit WORKER_ID, else hostname (not a random UUID).
     workerId: parsed.data.WORKER_ID ?? hostname(),
+    sendMinIntervalMs: parsed.data.SEND_MIN_INTERVAL_MS,
   };
   if (env === process.env) cached = cfg;
   return cfg;

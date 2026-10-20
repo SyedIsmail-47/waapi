@@ -1,0 +1,34 @@
+export const ERROR_CODES = [
+  "VALIDATION_ERROR",
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  "NOT_FOUND",
+  "CONFLICT",
+  "RATE_LIMITED",
+  "ACCOUNT_SESSION_CAP",
+  "GLOBAL_SESSION_CAP",
+  "NODE_SESSION_CAP",
+  "SESSION_LOGGED_OUT",
+  "SESSION_NOT_CONNECTED",
+  "IDEMPOTENCY_CONFLICT",
+  "INVALID_PHONE",
+  "EMAIL_NOT_VERIFIED",
+  "INVALID_CREDENTIALS",
+  "TOKEN_REVOKED",
+  "BRUTE_FORCE_LOCKED",
+  "SSRF_BLOCKED",
+  "WEBHOOK_DEAD",
+  "INTERNAL_ERROR",
+  "NOT_READY",
+  "NODE_LOCK_HELD",
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
+
+export type ApiErrorBody = {
+  error: {
+    code: ErrorCode | string;
+    message: string;
+    requestId: string;
+  };
+};

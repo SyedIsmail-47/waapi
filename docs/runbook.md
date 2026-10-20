@@ -49,6 +49,69 @@ pnpm ram-probe
 
 Use the table to set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling often ~8–20 depending on VPS RAM).
 
+## Phase 2 curl acceptance
+
+Run the API and worker, then use this development flow. Registration returns
+`verificationToken` outside production; in production, take the token from the
+verification email instead. The webhook URL must be a public HTTP(S) address.
+
+```bash
+BASE=http://localhost:3000/api/v1
+EMAIL_A="phase2-a-$(date +%s)@example.com"
+EMAIL_B="phase2-b-$(date +%s)@example.com"
+PASSWORD='correct-horse-battery-staple'
+
+REGISTER_A=$(curl -sS -X POST "$BASE/auth/register" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL_A\",\"password\":\"$PASSWORD\",\"name\":\"Account A\"}")
+VERIFY_A=$(printf '%s' "$REGISTER_A" | jq -r .verificationToken)
+curl -i -X POST "$BASE/auth/verify-email" \
+  -H 'content-type: application/json' \
+  -d "{\"token\":\"$VERIFY_A\"}"
+LOGIN_A=$(curl -sS -X POST "$BASE/auth/login" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL_A\",\"password\":\"$PASSWORD\"}")
+ACCESS_A=$(printf '%s' "$LOGIN_A" | jq -r .accessToken)
+
+SESSION=$(curl -sS -X POST "$BASE/sessions" \
+  -H "authorization: Bearer $ACCESS_A" \
+  -H 'content-type: application/json' \
+  -d '{"name":"curl-acceptance"}')
+SESSION_ID=$(printf '%s' "$SESSION" | jq -r .id)
+
+# Point this at a public catcher (webhook.site, requestbin, etc.). Deliveries are
+# signed with X-Waapi-Signature / X-Waapi-Timestamp / X-Waapi-Delivery-Id.
+curl -sS -X PUT "$BASE/sessions/$SESSION_ID/webhook" \
+  -H "authorization: Bearer $ACCESS_A" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://webhook.site/replace-with-your-public-id","secret":"acceptance-webhook-secret"}'
+
+curl -sS -X POST "$BASE/sessions/$SESSION_ID/connect" \
+  -H "authorization: Bearer $ACCESS_A"
+# Poll until status is need_scan and qr.value is present (worker must be running).
+curl -sS "$BASE/sessions/$SESSION_ID/status" \
+  -H "authorization: Bearer $ACCESS_A" | jq .
+# Optional synthetic delivery (also exercises HMAC + outbox path):
+curl -sS -X POST "$BASE/sessions/$SESSION_ID/webhook/test" \
+  -H "authorization: Bearer $ACCESS_A"
+
+REGISTER_B=$(curl -sS -X POST "$BASE/auth/register" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL_B\",\"password\":\"$PASSWORD\",\"name\":\"Account B\"}")
+VERIFY_B=$(printf '%s' "$REGISTER_B" | jq -r .verificationToken)
+curl -sS -X POST "$BASE/auth/verify-email" \
+  -H 'content-type: application/json' \
+  -d "{\"token\":\"$VERIFY_B\"}"
+LOGIN_B=$(curl -sS -X POST "$BASE/auth/login" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL_B\",\"password\":\"$PASSWORD\"}")
+ACCESS_B=$(printf '%s' "$LOGIN_B" | jq -r .accessToken)
+
+# Expect 404 (403 is also acceptable for an explicit authorization policy).
+curl -i "$BASE/sessions/$SESSION_ID" \
+  -H "authorization: Bearer $ACCESS_B"
+```
+
 ## RAM / caps
 
 Run `pnpm ram-probe` and fill the table above. Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.

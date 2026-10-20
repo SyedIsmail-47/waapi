@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
   pull_request:
 
 jobs:
@@ -43,6 +42,16 @@ jobs:
       MAX_SESSIONS_PER_NODE: "10"
       WORKER_METRICS_PORT: "9091"
       SEED_ACCOUNT_ID: 00000000-0000-4000-8000-000000000001
+      API_PORT: "3000"
+      JWT_SECRET: ci-jwt-secret-at-least-32-characters-long
+      ADMIN_API_SECRET: ci-admin-secret
+      EMAIL_DRIVER: console
+      WEBHOOK_SECRET_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DEV_RETURN_TOKENS: "true"
+      ALLOW_HTTP_WEBHOOKS: "true"
+      ENABLE_DOCS: "false"
+      GLOBAL_MAX_SESSIONS: "100"
+      DEFAULT_ACCOUNT_MAX_SESSIONS: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -51,11 +60,10 @@ jobs:
           version: 9.15.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm db:migrate
-      # Integration tests hit real Postgres + Redis service containers (CI=true fails if unreachable)
       - run: pnpm test

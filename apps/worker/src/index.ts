@@ -2,9 +2,9 @@ import { createBaileysClient } from "./baileys/baileys-client.js";
 import { loadConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { startSendTextWorker } from "./jobs/send-text.js";
+import { startSessionCommandsWorker } from "./jobs/session-commands.js";
 import { createLogger } from "./logger.js";
 import { SessionMetrics } from "./metrics.js";
-import { subscribeWorkerCommands } from "./redis/commands.js";
 import { createRedis } from "./redis/pubsub.js";
 import { NodeLock } from "./redis/node-lock.js";
 import { SessionManager } from "./session/manager.js";
@@ -24,7 +24,6 @@ async function main(): Promise<void> {
   const { db, client } = createDb(cfg.databaseUrl);
   const redis = createRedis(cfg.redisUrl);
 
-  // Refuse two live workers with the same WORKER_ID.
   const nodeLock = new NodeLock(redis, cfg.workerId, cfg.sessionLeaseTtlMs);
   await nodeLock.acquire();
   log.info(
@@ -45,7 +44,11 @@ async function main(): Promise<void> {
     metrics,
   );
 
-  subscribeWorkerCommands({ redis, manager, log });
+  const commandsWorker = startSessionCommandsWorker({
+    connection: redis.duplicate(),
+    manager,
+    log,
+  });
 
   const sendWorker = startSendTextWorker({
     connection: redis.duplicate(),
@@ -69,6 +72,7 @@ async function main(): Promise<void> {
   installShutdownHandlers({
     log,
     onShutdown: async () => {
+      await commandsWorker.close();
       await sendWorker.close();
       await manager.shutdown();
       await nodeLock.release();

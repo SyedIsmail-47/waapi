@@ -1,3 +1,34 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --ink: #14201a;
+  --muted: #5c6b63;
+  --paper: #f3f6f2;
+  --panel: #ffffff;
+  --line: #d5ddd7;
+  --accent: #1f7a4c;
+  --accent-soft: #e4f3ea;
+  --warn: #9a5b12;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #dff0e6 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #e8efe4 0%, transparent 50%),
+    var(--paper);
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.display {
+  font-family: Fraunces, Georgia, serif;
+}

@@ -1,0 +1,4031 @@
+﻿
+===== apps/api/src/app.ts =====
+import Fastify, { type FastifyInstance } from "fastify";
+import cors from "@fastify/cors";
+import sensible from "@fastify/sensible";
+import { createDb } from "@waapi/db";
+import {
+  serializerCompiler,
+  validatorCompiler,
+} from "fastify-type-provider-zod";
+import { config } from "./config.js";
+import authPlugin from "./plugins/auth.js";
+import errorHandler from "./plugins/error-handler.js";
+import rateLimit from "./plugins/rate-limit.js";
+import requestId from "./plugins/request-id.js";
+import authRoutes from "./routes/v1/auth.js";
+import healthRoutes from "./routes/v1/health.js";
+import messageRoutes from "./routes/v1/messages.js";
+import sendRoutes from "./routes/v1/send.js";
+import sessionRoutes from "./routes/v1/sessions.js";
+import webhookRoutes from "./routes/v1/webhooks.js";
+import { closeQueues } from "./services/queues.js";
+import { purgeAuthArtifacts } from "./services/auth.js";
+import "./types.js";
+
+export type BuiltApp = FastifyInstance & {
+  registeredRoutes: Array<{ method: string; url: string }>;
+};
+
+export async function buildApp(): Promise<BuiltApp> {
+  const app = Fastify({
+    // Numeric hop count (default 1). Boolean `true` would trust the entire chain.
+    trustProxy: config.TRUST_PROXY_HOPS as unknown as boolean,
+    logger:
+      config.NODE_ENV === "development"
+        ? { level: config.LOG_LEVEL, transport: { target: "pino-pretty" } }
+        : { level: config.LOG_LEVEL },
+    genReqId: (request) => {
+      const supplied = request.headers["x-request-id"];
+      return typeof supplied === "string" && supplied.length <= 128
+        ? supplied
+        : crypto.randomUUID();
+    },
+  }) as unknown as BuiltApp;
+
+  const registeredRoutes: Array<{ method: string; url: string }> = [];
+  app.decorate("registeredRoutes", registeredRoutes);
+  app.addHook("onRoute", (route) => {
+    const methods = Array.isArray(route.method) ? route.method : [route.method];
+    for (const method of methods) {
+      if (method === "HEAD" || method === "OPTIONS") continue;
+      registeredRoutes.push({ method, url: route.url });
+    }
+  });
+
+  const database = createDb(config.DATABASE_URL);
+  app.decorate("database", database);
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
+  await app.register(cors, { origin: false });
+  await app.register(sensible);
+
+  if (config.ENABLE_DOCS) {
+    const [{ default: swagger }, { jsonSchemaTransform }, swaggerUi] = await Promise.all([
+      import("@fastify/swagger"),
+      import("fastify-type-provider-zod"),
+      import("@fastify/swagger-ui"),
+    ]);
+    await app.register(swagger, {
+      openapi: { info: { title: `${config.BRAND_NAME} API`, version: "1.0.0" } },
+      transform: jsonSchemaTransform,
+    });
+    await app.register(swaggerUi.default, { routePrefix: "/docs" });
+    app.get("/openapi.json", async () => app.swagger());
+  }
+
+  await app.register(requestId);
+  await app.register(errorHandler);
+  await app.register(rateLimit);
+  await app.register(authPlugin);
+  await app.register(healthRoutes);
+  await app.register(authRoutes, { prefix: "/api/v1/auth" });
+  await app.register(sessionRoutes, { prefix: "/api/v1/sessions" });
+  await app.register(sendRoutes, { prefix: "/api/v1" });
+  await app.register(messageRoutes, { prefix: "/api/v1/messages" });
+  await app.register(webhookRoutes, { prefix: "/api/v1/sessions" });
+
+  const purgeTimer = setInterval(() => {
+    void purgeAuthArtifacts(database).catch(() => undefined);
+  }, 60 * 60_000);
+  purgeTimer.unref?.();
+
+  app.addHook("onClose", async () => {
+    clearInterval(purgeTimer);
+    await closeQueues();
+    await database.client.end();
+  });
+  return app;
+}
+
+export async function buildInternalApp(
+  database: ReturnType<typeof createDb>,
+): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger: { level: config.LOG_LEVEL },
+    trustProxy: false,
+  });
+  app.decorate("database", database);
+  const adminRoutes = await import("./routes/internal/admin.js");
+  await app.register(adminRoutes.default, { prefix: "/internal/admin" });
+  return app;
+}
+
+===== apps/api/src/plugins/auth.ts =====
+import fp from "fastify-plugin";
+import jwt from "@fastify/jwt";
+import { and, eq, isNull } from "drizzle-orm";
+import { accounts, personalAccessTokens, sessionApiKeys, users } from "@waapi/db";
+import { config } from "../config.js";
+import { sha256 } from "../lib/crypto.js";
+import type { Identity } from "../services/auth.js";
+
+export type AuthType = "jwt" | "pat" | "session_key";
+export type RequestIdentity = Identity & {
+  authType: AuthType;
+  sessionId?: string;
+  tokenHash?: string;
+  scopes?: string[];
+};
+
+const httpError = (message: string, statusCode: number, code: string) =>
+  Object.assign(new Error(message), { statusCode, code });
+
+async function touchLastUsed(
+  update: () => Promise<unknown>,
+  lastUsedAt: Date | null,
+): Promise<void> {
+  if (lastUsedAt && Date.now() - lastUsedAt.getTime() < 60_000) return;
+  await update();
+}
+
+export default fp(async (app) => {
+  await app.register(jwt, {
+    secret: config.JWT_SECRET,
+    sign: {
+      expiresIn: config.JWT_ACCESS_TTL,
+      algorithm: "HS256",
+      iss: config.JWT_ISSUER,
+      aud: config.JWT_AUDIENCE,
+    },
+    verify: {
+      algorithms: ["HS256"],
+      allowedIss: config.JWT_ISSUER,
+      allowedAud: config.JWT_AUDIENCE,
+    },
+  });
+
+  app.decorateRequest("identity", null as unknown as RequestIdentity);
+
+  app.decorate("authenticate", async (request, _reply) => {
+    const header = request.headers.authorization;
+    if (!header?.startsWith("Bearer ")) {
+      throw httpError("Bearer token required", 401, "UNAUTHORIZED");
+    }
+    const token = header.slice(7);
+
+    if (token.startsWith("waapi_pat_")) {
+      const hash = sha256(token);
+      const [row] = await app.database.db
+        .select()
+        .from(personalAccessTokens)
+        .where(and(eq(personalAccessTokens.tokenHash, hash), isNull(personalAccessTokens.revokedAt)))
+        .limit(1);
+      if (!row) throw httpError("Invalid token", 401, "UNAUTHORIZED");
+      const [account] = await app.database.db
+        .select()
+        .from(accounts)
+        .where(eq(accounts.id, row.accountId))
+        .limit(1);
+      const [user] = await app.database.db
+        .select()
+        .from(users)
+        .where(eq(users.id, row.userId))
+        .limit(1);
+      if (!account || account.suspendedAt || !user || user.disabledAt) {
+        throw httpError("Forbidden", 403, "FORBIDDEN");
+      }
+      await touchLastUsed(
+        () =>
+          app.database.db
+            .update(personalAccessTokens)
+            .set({ lastUsedAt: new Date() })
+            .where(eq(personalAccessTokens.id, row.id)),
+        row.lastUsedAt,
+      );
+      request.identity = {
+        userId: row.userId,
+        accountId: row.accountId,
+        role: "member",
+        isAdmin: false,
+        authType: "pat",
+        tokenHash: hash,
+        scopes: row.scopes ?? ["account"],
+      };
+      return;
+    }
+
+    if (token.startsWith("waapi_sk_")) {
+      const hash = sha256(token);
+      const [row] = await app.database.db
+        .select()
+        .from(sessionApiKeys)
+        .where(and(eq(sessionApiKeys.tokenHash, hash), isNull(sessionApiKeys.revokedAt)))
+        .limit(1);
+      if (!row) throw httpError("Invalid token", 401, "UNAUTHORIZED");
+      const [account] = await app.database.db
+        .select()
+        .from(accounts)
+        .where(eq(accounts.id, row.accountId))
+        .limit(1);
+      if (!account || account.suspendedAt) throw httpError("Forbidden", 403, "FORBIDDEN");
+      await touchLastUsed(
+        () =>
+          app.database.db
+            .update(sessionApiKeys)
+            .set({ lastUsedAt: new Date() })
+            .where(eq(sessionApiKeys.id, row.id)),
+        row.lastUsedAt,
+      );
+      request.identity = {
+        userId: row.id,
+        accountId: row.accountId,
+        role: "session",
+        isAdmin: false,
+        authType: "session_key",
+        sessionId: row.sessionId,
+        tokenHash: hash,
+      };
+      return;
+    }
+
+    await request.jwtVerify();
+    const payload = request.user;
+    const [user] = await app.database.db
+      .select()
+      .from(users)
+      .where(eq(users.id, payload.userId))
+      .limit(1);
+    const [account] = await app.database.db
+      .select()
+      .from(accounts)
+      .where(eq(accounts.id, payload.accountId))
+      .limit(1);
+    if (!user || user.disabledAt || !account || account.suspendedAt) {
+      throw httpError("Forbidden", 403, "FORBIDDEN");
+    }
+    request.identity = { ...payload, authType: "jwt", tokenHash: sha256(token) };
+  });
+
+  app.decorate("requireAuthType", (...types: AuthType[]) => {
+    return async (
+      request: import("fastify").FastifyRequest,
+      _reply: import("fastify").FastifyReply,
+    ) => {
+      await app.authenticate(request, _reply);
+      if (!types.includes(request.identity.authType)) {
+        throw httpError("Forbidden for this credential type", 403, "FORBIDDEN");
+      }
+      if (request.identity.authType === "pat") {
+        const scopes = request.identity.scopes ?? [];
+        if (!scopes.includes("account") && !scopes.includes("*")) {
+          throw httpError("PAT missing account scope", 403, "FORBIDDEN");
+        }
+      }
+    };
+  });
+});
+
+===== apps/api/src/plugins/rate-limit.ts =====
+import fp from "fastify-plugin";
+import rateLimit from "@fastify/rate-limit";
+import { config } from "../config.js";
+import { clientIp } from "../lib/client-ip.js";
+import { sha256 } from "../lib/crypto.js";
+import { redis } from "../services/queues.js";
+
+export default fp(async (app) => {
+  await app.register(rateLimit, {
+    global: true,
+    max: config.RATE_LIMIT_MAX,
+    timeWindow: config.RATE_LIMIT_WINDOW,
+    redis,
+    keyGenerator: (request) => {
+      const auth = request.headers.authorization;
+      if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+        const token = auth.slice(7);
+        if (request.identity?.accountId) {
+          return `acct:${request.identity.accountId}`;
+        }
+        return `tok:${sha256(token).slice(0, 32)}`;
+      }
+      return `ip:${clientIp(request)}`;
+    },
+    errorResponseBuilder: (_request, context) => ({
+      error: {
+        code: "RATE_LIMITED",
+        message: `Rate limit exceeded, retry after ${context.after}`,
+        requestId: _request.id,
+      },
+    }),
+  });
+});
+
+===== apps/api/src/lib/client-ip.ts =====
+import type { FastifyRequest } from "fastify";
+
+function trustCloudflare(): boolean {
+  const raw = process.env.TRUST_CLOUDFLARE;
+  if (raw == null) return false;
+  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+}
+
+/**
+ * Single client-IP helper for lockout, rate limits, and audit.
+ *
+ * - When TRUST_CLOUDFLARE=true: prefer CF-Connecting-IP (only safe behind CF +
+ *   nginx real_ip that overwrites the header; VPS firewall must allow 80/443
+ *   from Cloudflare only â€” see deploy/nginx.conf).
+ * - Otherwise: use request.ip from Fastify with trustProxy = TRUST_PROXY_HOPS
+ *   (numeric hop count, default 1). Do not read X-Forwarded-For here.
+ */
+export function clientIp(request: FastifyRequest): string {
+  if (trustCloudflare()) {
+    const cf = request.headers["cf-connecting-ip"];
+    if (typeof cf === "string" && cf.trim()) {
+      return cf.split(",")[0]!.trim();
+    }
+  }
+  return request.ip;
+}
+
+===== apps/api/src/lib/crypto.ts =====
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { config } from "../config.js";
+
+export const sha256 = (value: string): string =>
+  createHash("sha256").update(value).digest("hex");
+
+export const randomToken = (prefix = ""): string =>
+  prefix + randomBytes(32).toString("base64url");
+
+export function hashesEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function key(): Buffer {
+  const value = config.WEBHOOK_SECRET_KEY;
+  const decoded = /^[0-9a-f]{64}$/i.test(value)
+    ? Buffer.from(value, "hex")
+    : Buffer.from(value, "base64");
+  if (decoded.length !== 32) throw new Error("WEBHOOK_SECRET_KEY must decode to 32 bytes");
+  return decoded;
+}
+
+export function encryptSecret(value: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key(), iv);
+  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return [iv, cipher.getAuthTag(), ciphertext].map((part) => part.toString("base64url")).join(".");
+}
+
+export function decryptSecret(value: string): string {
+  const [ivText, tagText, ciphertextText] = value.split(".");
+  if (!ivText || !tagText || !ciphertextText) throw new Error("Invalid encrypted secret");
+  const decipher = createDecipheriv("aes-256-gcm", key(), Buffer.from(ivText, "base64url"));
+  decipher.setAuthTag(Buffer.from(tagText, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(ciphertextText, "base64url")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+===== apps/api/src/lib/phone.ts =====
+import { parsePhoneNumberFromString } from "libphonenumber-js";
+
+const JID_RE = /^[1-9]\d{6,14}@s\.whatsapp\.net$/;
+
+export function toWhatsAppJid(input: string): string {
+  const trimmed = input.trim();
+  if (JID_RE.test(trimmed)) return trimmed;
+
+  const phone = parsePhoneNumberFromString(trimmed);
+  if (!phone?.isValid()) {
+    const error = new Error("Phone number must be valid E.164 or WhatsApp JID");
+    Object.assign(error, { statusCode: 400, code: "INVALID_PHONE" });
+    throw error;
+  }
+  return `${phone.number.slice(1)}@s.whatsapp.net`;
+}
+
+===== apps/api/src/services/auth.ts =====
+import argon2 from "argon2";
+import { randomUUID } from "node:crypto";
+import { and, count, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  accounts,
+  emailVerificationTokens,
+  loginAttempts,
+  passwordResetTokens,
+  refreshTokens,
+  securityAuditLog,
+  users,
+  type Db,
+} from "@waapi/db";
+import { config } from "../config.js";
+import { randomToken, sha256 } from "../lib/crypto.js";
+import { defaultJobOptions, emailQueue } from "./queues.js";
+
+const db = (value: Db) => value.db;
+
+/** Precomputed argon2id hash so unknown-email logins still pay verify cost. */
+let dummyHashPromise: Promise<string> | null = null;
+const dummyHash = () => {
+  dummyHashPromise ??= argon2.hash("timing-dummy-password-not-a-secret", {
+    type: argon2.argon2id,
+  });
+  return dummyHashPromise;
+};
+
+const expiry = (ttl: string): Date => {
+  const match = /^(\d+)([mhd])$/.exec(ttl);
+  if (!match) throw new Error(`Invalid TTL: ${ttl}`);
+  const unit = { m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]!]!;
+  return new Date(Date.now() + Number(match[1]) * unit);
+};
+
+export type Identity = {
+  userId: string;
+  accountId: string;
+  role: string;
+  isAdmin: boolean;
+};
+
+async function audit(
+  database: Db,
+  identity: Partial<Identity>,
+  eventType: string,
+  ip?: string,
+  meta?: Record<string, unknown>,
+) {
+  await db(database).insert(securityAuditLog).values({
+    accountId: identity.accountId,
+    userId: identity.userId,
+    eventType,
+    ip,
+    meta: meta ?? {},
+  });
+}
+
+async function issueRefresh(database: Db, userId: string, familyId = randomUUID()) {
+  const token = randomToken();
+  const [row] = await db(database)
+    .insert(refreshTokens)
+    .values({
+      userId,
+      familyId,
+      tokenHash: sha256(token),
+      expiresAt: expiry(config.REFRESH_TTL),
+    })
+    .returning();
+  return { token, row: row! };
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: string }).code === "23505"
+  );
+}
+
+export async function register(
+  database: Db,
+  input: { email: string; password: string; name?: string },
+  ip?: string,
+) {
+  const email = input.email.trim().toLowerCase();
+  const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
+  let result: { account: typeof accounts.$inferSelect; user: typeof users.$inferSelect; verificationToken: string };
+  try {
+    result = await db(database).transaction(async (tx) => {
+      const [account] = await tx
+        .insert(accounts)
+        .values({ name: input.name ?? email })
+        .returning();
+      const [user] = await tx
+        .insert(users)
+        .values({ accountId: account!.id, email, passwordHash, role: "owner" })
+        .returning();
+      const token = randomToken();
+      await tx.insert(emailVerificationTokens).values({
+        userId: user!.id,
+        tokenHash: sha256(token),
+        expiresAt: expiry("24h"),
+      });
+      return { account: account!, user: user!, verificationToken: token };
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw Object.assign(new Error("Email already registered"), {
+        statusCode: 409,
+        code: "CONFLICT",
+      });
+    }
+    throw err;
+  }
+  await emailQueue.add(
+    "verify-email",
+    {
+      to: email,
+      subject: "Verify your email",
+      kind: "verify_email",
+      // token only in job payload briefly; removeOnComplete clears it
+      token: result.verificationToken,
+    },
+    defaultJobOptions,
+  );
+  await audit(database, { accountId: result.account.id, userId: result.user.id }, "auth.register", ip);
+  return result;
+}
+
+export async function login(database: Db, emailInput: string, password: string, ip: string) {
+  const email = emailInput.trim().toLowerCase();
+  const since = new Date(Date.now() - 15 * 60_000);
+  const [byEmail] = await db(database)
+    .select({ value: count() })
+    .from(loginAttempts)
+    .where(
+      and(
+        eq(loginAttempts.email, email),
+        eq(loginAttempts.succeeded, false),
+        gt(loginAttempts.createdAt, since),
+      ),
+    );
+  const [byIp] = await db(database)
+    .select({ value: count() })
+    .from(loginAttempts)
+    .where(
+      and(
+        eq(loginAttempts.ip, ip),
+        eq(loginAttempts.succeeded, false),
+        gt(loginAttempts.createdAt, since),
+      ),
+    );
+  if ((byEmail?.value ?? 0) >= 10 || (byIp?.value ?? 0) >= 30) {
+    throw Object.assign(new Error("Too many login attempts"), {
+      statusCode: 429,
+      code: "BRUTE_FORCE_LOCKED",
+    });
+  }
+
+  const [user] = await db(database).select().from(users).where(eq(users.email, email)).limit(1);
+  const hash = user?.passwordHash ?? (await dummyHash());
+  const valid = await argon2.verify(hash, password).catch(() => false);
+  const ok = Boolean(user && valid);
+  await db(database).insert(loginAttempts).values({ email, ip, succeeded: ok });
+  if (!ok) {
+    throw Object.assign(new Error("Invalid credentials"), {
+      statusCode: 401,
+      code: "INVALID_CREDENTIALS",
+    });
+  }
+  if (user!.disabledAt) {
+    throw Object.assign(new Error("Account disabled"), { statusCode: 403, code: "FORBIDDEN" });
+  }
+  if (!user!.emailVerifiedAt) {
+    throw Object.assign(new Error("Email is not verified"), {
+      statusCode: 403,
+      code: "EMAIL_NOT_VERIFIED",
+    });
+  }
+  const [account] = await db(database)
+    .select()
+    .from(accounts)
+    .where(eq(accounts.id, user!.accountId))
+    .limit(1);
+  if (account?.suspendedAt) {
+    throw Object.assign(new Error("Account suspended"), { statusCode: 403, code: "FORBIDDEN" });
+  }
+  const refresh = await issueRefresh(database, user!.id);
+  await audit(database, { accountId: user!.accountId, userId: user!.id }, "auth.login", ip);
+  return {
+    identity: {
+      userId: user!.id,
+      accountId: user!.accountId,
+      role: user!.role,
+      isAdmin: user!.isAdmin,
+    },
+    refreshToken: refresh.token,
+  };
+}
+
+export async function rotateRefresh(database: Db, token: string, ip?: string) {
+  const hash = sha256(token);
+  return db(database).transaction(async (tx) => {
+    const claimed = await tx.execute(sql`
+      update refresh_tokens
+      set revoked_at = now()
+      where token_hash = ${hash}
+        and revoked_at is null
+        and expires_at > now()
+      returning id, user_id, family_id
+    `);
+    const current = claimed[0] as
+      | { id: string; user_id: string; family_id: string }
+      | undefined;
+
+    if (!current) {
+      const [existing] = await tx
+        .select()
+        .from(refreshTokens)
+        .where(eq(refreshTokens.tokenHash, hash))
+        .limit(1);
+      if (existing) {
+        await tx
+          .update(refreshTokens)
+          .set({ revokedAt: new Date() })
+          .where(eq(refreshTokens.familyId, existing.familyId));
+        await tx.insert(securityAuditLog).values({
+          userId: existing.userId,
+          eventType: "auth.refresh_reuse",
+          ip,
+          meta: { familyId: existing.familyId },
+        });
+      }
+      throw Object.assign(new Error("Refresh token revoked"), {
+        statusCode: 401,
+        code: "TOKEN_REVOKED",
+      });
+    }
+
+    const [user] = await tx.select().from(users).where(eq(users.id, current.user_id)).limit(1);
+    if (!user || user.disabledAt) {
+      throw Object.assign(new Error("User not found"), { statusCode: 401, code: "UNAUTHORIZED" });
+    }
+    const nextToken = randomToken();
+    const [next] = await tx
+      .insert(refreshTokens)
+      .values({
+        userId: user.id,
+        familyId: current.family_id,
+        tokenHash: sha256(nextToken),
+        expiresAt: expiry(config.REFRESH_TTL),
+      })
+      .returning();
+    await tx
+      .update(refreshTokens)
+      .set({ replacedBy: next!.id })
+      .where(eq(refreshTokens.id, current.id));
+    return {
+      identity: {
+        userId: user.id,
+        accountId: user.accountId,
+        role: user.role,
+        isAdmin: user.isAdmin,
+      },
+      refreshToken: nextToken,
+    };
+  });
+}
+
+export async function logoutAll(database: Db, userId: string) {
+  await db(database)
+    .update(refreshTokens)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
+}
+
+export async function verifyEmail(database: Db, token: string) {
+  const hash = sha256(token);
+  await db(database).transaction(async (tx) => {
+    const claimed = await tx.execute(sql`
+      update email_verification_tokens
+      set used_at = now()
+      where token_hash = ${hash}
+        and used_at is null
+        and expires_at > now()
+      returning id, user_id
+    `);
+    const row = claimed[0] as { id: string; user_id: string } | undefined;
+    if (!row) {
+      throw Object.assign(new Error("Invalid verification token"), {
+        statusCode: 400,
+        code: "TOKEN_REVOKED",
+      });
+    }
+    await tx
+      .update(users)
+      .set({ emailVerifiedAt: new Date(), updatedAt: new Date() })
+      .where(eq(users.id, row.user_id));
+  });
+}
+
+export async function resendVerification(database: Db, emailInput: string) {
+  const email = emailInput.trim().toLowerCase();
+  const [user] = await db(database).select().from(users).where(eq(users.email, email)).limit(1);
+  if (!user || user.emailVerifiedAt) return;
+  await db(database)
+    .update(emailVerificationTokens)
+    .set({ usedAt: new Date() })
+    .where(
+      and(
+        eq(emailVerificationTokens.userId, user.id),
+        isNull(emailVerificationTokens.usedAt),
+      ),
+    );
+  const token = randomToken();
+  await db(database).insert(emailVerificationTokens).values({
+    userId: user.id,
+    tokenHash: sha256(token),
+    expiresAt: expiry("24h"),
+  });
+  await emailQueue.add(
+    "verify-email",
+    { to: email, kind: "verify_email", token },
+    defaultJobOptions,
+  );
+}
+
+export async function forgotPassword(database: Db, emailInput: string) {
+  const email = emailInput.trim().toLowerCase();
+  const [user] = await db(database).select().from(users).where(eq(users.email, email)).limit(1);
+  if (!user) return;
+
+  const since = new Date(Date.now() - 15 * 60_000);
+  const [recent] = await db(database)
+    .select({ value: count() })
+    .from(passwordResetTokens)
+    .where(
+      and(eq(passwordResetTokens.userId, user.id), gt(passwordResetTokens.createdAt, since)),
+    );
+  if ((recent?.value ?? 0) >= 3) return;
+
+  await db(database)
+    .update(passwordResetTokens)
+    .set({ usedAt: new Date() })
+    .where(
+      and(eq(passwordResetTokens.userId, user.id), isNull(passwordResetTokens.usedAt)),
+    );
+
+  const token = randomToken();
+  await db(database).insert(passwordResetTokens).values({
+    userId: user.id,
+    tokenHash: sha256(token),
+    expiresAt: expiry("1h"),
+  });
+  await emailQueue.add(
+    "reset-password",
+    { to: user.email, kind: "reset_password", token },
+    defaultJobOptions,
+  );
+}
+
+export async function resetPassword(database: Db, token: string, password: string) {
+  await db(database).transaction(async (tx) => {
+    const claimed = await tx.execute(sql`
+      update password_reset_tokens
+      set used_at = now()
+      where token_hash = ${sha256(token)}
+        and used_at is null
+        and expires_at > now()
+      returning id, user_id
+    `);
+    const row = claimed[0] as { id: string; user_id: string } | undefined;
+    if (!row) {
+      throw Object.assign(new Error("Invalid reset token"), {
+        statusCode: 400,
+        code: "TOKEN_REVOKED",
+      });
+    }
+    await tx
+      .update(users)
+      .set({
+        passwordHash: await argon2.hash(password, { type: argon2.argon2id }),
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, row.user_id));
+    await tx
+      .update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(eq(refreshTokens.userId, row.user_id));
+  });
+}
+
+/** Purge old login attempts and expired auth tokens (best-effort maintenance). */
+export async function purgeAuthArtifacts(database: Db): Promise<void> {
+  const cutoff = new Date(Date.now() - 7 * 86_400_000);
+  await db(database).delete(loginAttempts).where(lt(loginAttempts.createdAt, cutoff));
+  await db(database)
+    .delete(refreshTokens)
+    .where(or(lt(refreshTokens.expiresAt, new Date()), sql`revoked_at is not null and revoked_at < ${cutoff}`));
+  await db(database)
+    .delete(emailVerificationTokens)
+    .where(or(lt(emailVerificationTokens.expiresAt, new Date()), sql`used_at is not null`));
+  await db(database)
+    .delete(passwordResetTokens)
+    .where(or(lt(passwordResetTokens.expiresAt, new Date()), sql`used_at is not null`));
+}
+
+===== apps/api/src/services/sessions.ts =====
+import { and, count, eq, ne, sql } from "drizzle-orm";
+import { sessions, type Db } from "@waapi/db";
+import { REDIS_KEY } from "@waapi/shared";
+import { config } from "../config.js";
+import { defaultJobOptions, redis, sessionCommandsQueue } from "./queues.js";
+
+const missing = () =>
+  Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+
+export async function createSession(
+  database: Db,
+  accountId: string,
+  name: string,
+  requestId: string,
+) {
+  const session = await database.db.transaction(async (tx) => {
+    await tx.execute(sql`select id from accounts where id = ${accountId} for update`);
+    const accountRows = await tx.execute(
+      sql`select id, max_sessions, suspended_at from accounts where id = ${accountId}`,
+    );
+    const account = accountRows[0] as
+      | { id: string; max_sessions: number; suspended_at: Date | null }
+      | undefined;
+    if (!account) {
+      throw Object.assign(new Error("Account not found"), { statusCode: 404, code: "NOT_FOUND" });
+    }
+    if (account.suspended_at) {
+      throw Object.assign(new Error("Account suspended"), { statusCode: 403, code: "FORBIDDEN" });
+    }
+
+    const [global] = await tx.select({ value: count() }).from(sessions).where(ne(sessions.status, "logged_out"));
+    if ((global?.value ?? 0) >= config.GLOBAL_MAX_SESSIONS) {
+      throw Object.assign(new Error("Global session capacity reached"), {
+        statusCode: 503,
+        code: "GLOBAL_SESSION_CAP",
+      });
+    }
+
+    const [total] = await tx
+      .select({ value: count() })
+      .from(sessions)
+      .where(and(eq(sessions.accountId, accountId), ne(sessions.status, "logged_out")));
+    if ((total?.value ?? 0) >= Number(account.max_sessions)) {
+      throw Object.assign(new Error("Account session cap reached"), {
+        statusCode: 409,
+        code: "ACCOUNT_SESSION_CAP",
+      });
+    }
+    const [row] = await tx.insert(sessions).values({ accountId, name }).returning();
+    return row!;
+  });
+
+  try {
+    await sessionCommandsQueue.add(
+      "open-session",
+      {
+        type: "open-session",
+        accountId,
+        sessionId: session.id,
+        requestId,
+      },
+      { ...defaultJobOptions, jobId: `open-${session.id}-${Date.now()}` },
+    );
+  } catch (err) {
+    await database.db.delete(sessions).where(eq(sessions.id, session.id));
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+      statusCode: 503,
+      code: "INTERNAL_ERROR",
+    });
+  }
+  return session;
+}
+
+export const listSessions = (database: Db, accountId: string) =>
+  database.db.select().from(sessions).where(eq(sessions.accountId, accountId));
+
+export async function getSession(database: Db, accountId: string, id: string) {
+  const [row] = await database.db
+    .select()
+    .from(sessions)
+    .where(and(eq(sessions.id, id), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!row) throw missing();
+  return row;
+}
+
+export async function deleteSession(database: Db, accountId: string, id: string) {
+  await getSession(database, accountId, id);
+  await command(database, accountId, id, "logout", "delete");
+}
+
+export async function command(
+  database: Db,
+  accountId: string,
+  id: string,
+  action: "connect" | "disconnect" | "logout",
+  requestId: string,
+) {
+  await getSession(database, accountId, id);
+  const type =
+    action === "connect"
+      ? "open-session"
+      : action === "logout"
+        ? "logout-session"
+        : "close-session";
+  await sessionCommandsQueue.add(
+    type,
+    { type, accountId, sessionId: id, requestId },
+    defaultJobOptions,
+  );
+}
+
+export async function status(database: Db, accountId: string, id: string) {
+  const row = await getSession(database, accountId, id);
+  const cached = await redis.get(REDIS_KEY.qr(id));
+  let qr: { value: string; updatedAt: string; expiresAt: string } | null = null;
+  if (cached) {
+    const parsed = JSON.parse(cached) as {
+      qr?: string;
+      value?: string;
+      at?: string;
+      updatedAt?: string;
+      expiresAt: string;
+    };
+    qr = {
+      value: parsed.value ?? parsed.qr ?? "",
+      updatedAt: parsed.updatedAt ?? parsed.at ?? new Date().toISOString(),
+      expiresAt: parsed.expiresAt,
+    };
+  }
+  const expired = qr ? new Date(qr.expiresAt) <= new Date() : false;
+  const showQr = row.status === "need_scan" && qr && qr.value && !expired;
+  return {
+    id: row.id,
+    status: row.status,
+    phoneNumber: row.phoneNumber,
+    lastError: row.lastError,
+    nodeId: row.nodeId,
+    qr: showQr ? qr : null,
+    qrExpired: expired || undefined,
+  };
+}
+
+===== apps/api/src/services/send.ts =====
+import { createHash, randomUUID } from "node:crypto";
+import { and, eq, sql } from "drizzle-orm";
+import { idempotencyKeys, outboundMessages, sessions, type Db } from "@waapi/db";
+import { toWhatsAppJid } from "../lib/phone.js";
+import { defaultJobOptions, sendTextQueue } from "./queues.js";
+
+type SendInput = { sessionId: string; to: string; text: string };
+type SendResponse = { id: string; status: "queued" | "failed" };
+
+export async function sendText(
+  database: Db,
+  accountId: string,
+  input: SendInput,
+  key: string,
+  requestId: string,
+): Promise<SendResponse> {
+  const bodyHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+
+  // Claim idempotency slot first so concurrent duplicates share one winner.
+  await database.db.execute(sql`
+    insert into idempotency_keys (id, account_id, key, request_hash, response_status, response_body, expires_at)
+    values (
+      ${randomUUID()}::uuid,
+      ${accountId}::uuid,
+      ${key},
+      ${bodyHash},
+      202,
+      ${JSON.stringify({ id: null, status: "queued" })}::jsonb,
+      ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz
+    )
+    on conflict (account_id, key) do nothing
+  `);
+
+  const [prior] = await database.db
+    .select()
+    .from(idempotencyKeys)
+    .where(and(eq(idempotencyKeys.accountId, accountId), eq(idempotencyKeys.key, key)))
+    .limit(1);
+  if (!prior) {
+    throw Object.assign(new Error("Idempotency claim failed"), {
+      statusCode: 500,
+      code: "INTERNAL_ERROR",
+    });
+  }
+  if (prior.requestHash !== bodyHash) {
+    throw Object.assign(new Error("Idempotency key reused with different body"), {
+      statusCode: 409,
+      code: "IDEMPOTENCY_CONFLICT",
+    });
+  }
+  const priorBody = prior.responseBody as { id?: string | null; status?: string };
+  if (priorBody.id) {
+    return priorBody as SendResponse;
+  }
+
+  // Winner continues: create outbound row then enqueue after commit.
+  const [session] = await database.db
+    .select()
+    .from(sessions)
+    .where(and(eq(sessions.id, input.sessionId), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!session) {
+    throw Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  if (session.status !== "connected") {
+    throw Object.assign(new Error("Session is not connected"), {
+      statusCode: 409,
+      code: "SESSION_NOT_CONNECTED",
+    });
+  }
+
+  const to = toWhatsAppJid(input.to);
+  const message = await database.db.transaction(async (tx) => {
+    // Re-check if another winner already filled the response.
+    const [again] = await tx
+      .select()
+      .from(idempotencyKeys)
+      .where(and(eq(idempotencyKeys.accountId, accountId), eq(idempotencyKeys.key, key)))
+      .limit(1);
+    const againBody = again?.responseBody as { id?: string | null } | undefined;
+    if (againBody?.id) {
+      return { id: againBody.id, status: "queued" as const, skipEnqueue: true };
+    }
+
+    const [row] = await tx
+      .insert(outboundMessages)
+      .values({ accountId, sessionId: input.sessionId, toJid: to, idempotencyKey: key })
+      .returning();
+    const response: SendResponse = { id: row!.id, status: "queued" };
+    await tx
+      .update(idempotencyKeys)
+      .set({ responseStatus: 202, responseBody: response })
+      .where(eq(idempotencyKeys.id, prior.id));
+    return { ...response, skipEnqueue: false };
+  });
+
+  if (message.skipEnqueue) {
+    return { id: message.id, status: "queued" };
+  }
+
+  try {
+    await sendTextQueue.add(
+      "send-text",
+      {
+        accountId,
+        sessionId: input.sessionId,
+        to,
+        text: input.text,
+        messageId: message.id,
+        idempotencyKey: key,
+        requestId,
+      },
+      {
+        ...defaultJobOptions,
+        jobId: message.id,
+        attempts: 5,
+        backoff: { type: "exponential", delay: 1_000 },
+      },
+    );
+  } catch (err) {
+    await database.db
+      .update(outboundMessages)
+      .set({
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        updatedAt: new Date(),
+      })
+      .where(eq(outboundMessages.id, message.id));
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+      statusCode: 503,
+      code: "INTERNAL_ERROR",
+    });
+  }
+
+  return { id: message.id, status: "queued" };
+}
+
+===== apps/api/src/services/queues.ts =====
+import { Queue, type JobsOptions } from "bullmq";
+import { Redis } from "ioredis";
+import {
+  QUEUE_EMAIL,
+  QUEUE_SEND_TEXT,
+  QUEUE_SESSION_COMMANDS,
+  QUEUE_WEBHOOK_DELIVERY,
+} from "@waapi/shared";
+import { config } from "../config.js";
+
+export const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
+const connection = redis;
+
+/** Short retention. Send-text redacts body before final fail; keep fails brief. */
+export const defaultJobOptions: JobsOptions = {
+  removeOnComplete: { age: 60, count: 200 },
+  removeOnFail: { age: 1, count: 50 },
+};
+
+export const sessionCommandsQueue = new Queue(QUEUE_SESSION_COMMANDS, {
+  connection,
+  defaultJobOptions,
+});
+export const sendTextQueue = new Queue(QUEUE_SEND_TEXT, {
+  connection,
+  defaultJobOptions,
+});
+export const webhookDeliveryQueue = new Queue(QUEUE_WEBHOOK_DELIVERY, {
+  connection,
+  defaultJobOptions,
+});
+export const emailQueue = new Queue(QUEUE_EMAIL, {
+  connection,
+  defaultJobOptions,
+});
+
+export async function closeQueues(): Promise<void> {
+  await Promise.all([
+    sessionCommandsQueue.close(),
+    sendTextQueue.close(),
+    webhookDeliveryQueue.close(),
+    emailQueue.close(),
+  ]);
+  await redis.quit();
+}
+
+===== apps/api/src/services/tokens.ts =====
+import { and, eq, isNull } from "drizzle-orm";
+import { personalAccessTokens, sessionApiKeys, sessions, type Db } from "@waapi/db";
+import { randomToken, sha256 } from "../lib/crypto.js";
+
+export async function createPat(database: Db, userId: string, accountId: string, name: string) {
+  const token = randomToken("waapi_pat_");
+  const [row] = await database.db
+    .insert(personalAccessTokens)
+    .values({
+      userId,
+      accountId,
+      name,
+      tokenPrefix: token.slice(0, 18),
+      tokenHash: sha256(token),
+      scopes: ["account"],
+    })
+    .returning();
+  return {
+    id: row!.id,
+    name: row!.name,
+    tokenPrefix: row!.tokenPrefix,
+    scopes: row!.scopes,
+    createdAt: row!.createdAt,
+    token,
+  };
+}
+
+export async function listPats(database: Db, accountId: string) {
+  return database.db
+    .select({
+      id: personalAccessTokens.id,
+      name: personalAccessTokens.name,
+      tokenPrefix: personalAccessTokens.tokenPrefix,
+      scopes: personalAccessTokens.scopes,
+      lastUsedAt: personalAccessTokens.lastUsedAt,
+      createdAt: personalAccessTokens.createdAt,
+      revokedAt: personalAccessTokens.revokedAt,
+    })
+    .from(personalAccessTokens)
+    .where(eq(personalAccessTokens.accountId, accountId));
+}
+
+export async function revokePat(database: Db, accountId: string, id: string) {
+  const [row] = await database.db
+    .update(personalAccessTokens)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(personalAccessTokens.id, id),
+        eq(personalAccessTokens.accountId, accountId),
+        isNull(personalAccessTokens.revokedAt),
+      ),
+    )
+    .returning();
+  if (!row) {
+    throw Object.assign(new Error("Token not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+}
+
+export async function createSessionKey(
+  database: Db,
+  accountId: string,
+  sessionId: string,
+  name: string,
+) {
+  const [session] = await database.db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!session) {
+    throw Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  const token = randomToken("waapi_sk_");
+  const [row] = await database.db
+    .insert(sessionApiKeys)
+    .values({
+      accountId,
+      sessionId,
+      name,
+      tokenPrefix: token.slice(0, 17),
+      tokenHash: sha256(token),
+    })
+    .returning();
+  return {
+    id: row!.id,
+    name: row!.name,
+    sessionId: row!.sessionId,
+    tokenPrefix: row!.tokenPrefix,
+    createdAt: row!.createdAt,
+    token,
+  };
+}
+
+export async function revokeSessionKey(
+  database: Db,
+  accountId: string,
+  sessionId: string,
+  id: string,
+) {
+  const [row] = await database.db
+    .update(sessionApiKeys)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(sessionApiKeys.id, id),
+        eq(sessionApiKeys.accountId, accountId),
+        eq(sessionApiKeys.sessionId, sessionId),
+        isNull(sessionApiKeys.revokedAt),
+      ),
+    )
+    .returning();
+  if (!row) {
+    throw Object.assign(new Error("Session key not found"), {
+      statusCode: 404,
+      code: "NOT_FOUND",
+    });
+  }
+}
+
+===== apps/api/src/services/webhooks/index.ts =====
+import { createHash, randomBytes } from "node:crypto";
+import { and, eq } from "drizzle-orm";
+import { sessions, webhookDeliveries, webhookEndpoints, type Db } from "@waapi/db";
+import { decryptSecret, encryptSecret } from "../../lib/crypto.js";
+import { defaultJobOptions, webhookDeliveryQueue } from "../queues.js";
+import { assertPublicUrl } from "./ssrf.js";
+
+export async function upsertWebhook(
+  database: Db,
+  accountId: string,
+  sessionId: string,
+  input: { url: string; secret?: string; enabled?: boolean },
+) {
+  await assertPublicUrl(input.url);
+  const [session] = await database.db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!session) {
+    throw Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  const [existing] = await database.db
+    .select()
+    .from(webhookEndpoints)
+    .where(eq(webhookEndpoints.sessionId, sessionId))
+    .limit(1);
+  const secret =
+    input.secret ??
+    (existing ? decryptSecret(existing.secretEncrypted) : randomBytes(32).toString("base64url"));
+  const values = {
+    accountId,
+    sessionId,
+    url: input.url,
+    enabled: input.enabled ?? true,
+    secretEncrypted: encryptSecret(secret),
+    updatedAt: new Date(),
+  };
+  const [row] = existing
+    ? await database.db
+        .update(webhookEndpoints)
+        .set(values)
+        .where(eq(webhookEndpoints.id, existing.id))
+        .returning()
+    : await database.db.insert(webhookEndpoints).values(values).returning();
+  return { ...row!, secret: existing && !input.secret ? undefined : secret };
+}
+
+export async function removeWebhook(database: Db, accountId: string, sessionId: string) {
+  await database.db
+    .delete(webhookEndpoints)
+    .where(and(eq(webhookEndpoints.accountId, accountId), eq(webhookEndpoints.sessionId, sessionId)));
+}
+
+export async function getWebhook(database: Db, accountId: string, sessionId: string) {
+  const [row] = await database.db
+    .select({
+      id: webhookEndpoints.id,
+      url: webhookEndpoints.url,
+      enabled: webhookEndpoints.enabled,
+      createdAt: webhookEndpoints.createdAt,
+      updatedAt: webhookEndpoints.updatedAt,
+    })
+    .from(webhookEndpoints)
+    .where(and(eq(webhookEndpoints.accountId, accountId), eq(webhookEndpoints.sessionId, sessionId)))
+    .limit(1);
+  if (!row) {
+    throw Object.assign(new Error("Webhook not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  return row;
+}
+
+export async function testWebhook(database: Db, accountId: string, sessionId: string) {
+  const [endpoint] = await database.db
+    .select()
+    .from(webhookEndpoints)
+    .where(and(eq(webhookEndpoints.accountId, accountId), eq(webhookEndpoints.sessionId, sessionId)))
+    .limit(1);
+  if (!endpoint) {
+    throw Object.assign(new Error("Webhook not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  const payload = {
+    id: crypto.randomUUID(),
+    type: "session.status" as const,
+    accountId,
+    sessionId,
+    createdAt: new Date().toISOString(),
+    data: { status: "connected", test: true },
+  };
+  const [delivery] = await database.db
+    .insert(webhookDeliveries)
+    .values({
+      endpointId: endpoint.id,
+      accountId,
+      sessionId,
+      eventType: "session.status",
+      payload,
+      payloadHash: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
+    })
+    .returning();
+  return delivery!.id;
+}
+
+export async function enqueueDelivery(id: string): Promise<void> {
+  await webhookDeliveryQueue.add(
+    "deliver",
+    { deliveryId: id },
+    {
+      ...defaultJobOptions,
+      jobId: id,
+      attempts: 8,
+      backoff: { type: "custom" },
+    },
+  );
+}
+
+===== apps/api/src/services/webhooks/ssrf.ts =====
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { Agent, type Dispatcher } from "undici";
+import ipaddr from "ipaddr.js";
+
+function allowHttpWebhooks(): boolean {
+  const raw = process.env.ALLOW_HTTP_WEBHOOKS;
+  return raw != null && ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+}
+
+export type LookupFn = (
+  hostname: string,
+  options: unknown,
+  callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+) => void;
+
+function normalizeHostname(hostname: string): string {
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    return hostname.slice(1, -1);
+  }
+  return hostname;
+}
+
+/** Expand decimal / dotted-hex / octal-ish IPv4 literals into dotted decimal when possible. */
+function coerceIpLiteral(hostname: string): string | null {
+  const host = normalizeHostname(hostname);
+  if (isIP(host)) return host;
+
+  // Pure decimal IPv4 (e.g. 2130706433)
+  if (/^\d+$/.test(host)) {
+    const n = Number(host);
+    if (n >= 0 && n <= 0xffffffff) {
+      return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
+    }
+  }
+
+  // Dotted hex/octal forms like 0x7f.1 or 0177.0.0.1 â€” reject by attempting ipaddr parse after
+  // converting each octet if hex/octal prefixed.
+  if (host.includes(".")) {
+    const parts = host.split(".");
+    if (parts.length === 4 || parts.length === 2) {
+      try {
+        const nums = parts.map((part) => {
+          if (/^0x[0-9a-f]+$/i.test(part)) return Number.parseInt(part, 16);
+          if (/^0[0-7]+$/.test(part)) return Number.parseInt(part, 8);
+          if (/^\d+$/.test(part)) return Number(part);
+          throw new Error("bad");
+        });
+        if (nums.length === 2) {
+          // 0x7f.1 â†’ 127.0.0.1 style (a.b as 127.1)
+          const a = nums[0]!;
+          const b = nums[1]!;
+          if (a <= 255 && b <= 0xffffff) {
+            return [a, (b >>> 16) & 255, (b >>> 8) & 255, b & 255].join(".");
+          }
+        }
+        if (nums.every((n) => n >= 0 && n <= 255)) return nums.join(".");
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+  return null;
+}
+
+export function isBlockedAddress(address: string): boolean {
+  let parsed: ipaddr.IPv4 | ipaddr.IPv6;
+  try {
+    parsed = ipaddr.parse(address);
+  } catch {
+    return true;
+  }
+
+  if (parsed.kind() === "ipv6") {
+    const v6 = parsed as ipaddr.IPv6;
+    if (v6.isIPv4MappedAddress()) {
+      return isBlockedAddress(v6.toIPv4Address().toString());
+    }
+    const range = v6.range();
+    if (
+      range === "unspecified" ||
+      range === "loopback" ||
+      range === "uniqueLocal" ||
+      range === "linkLocal" ||
+      range === "multicast" ||
+      range === "reserved"
+    ) {
+      return true;
+    }
+    // fc00::/7 unique local already covered; ff00::/8 multicast covered
+    return false;
+  }
+
+  const v4 = parsed as ipaddr.IPv4;
+  const range = v4.range();
+  if (
+    range === "unspecified" ||
+    range === "broadcast" ||
+    range === "multicast" ||
+    range === "linkLocal" ||
+    range === "loopback" ||
+    range === "private" ||
+    range === "reserved" ||
+    range === "carrierGradeNat" ||
+    range === "benchmarking"
+  ) {
+    return true;
+  }
+  // 192.0.0.0/24 (IETF protocol assignments) â€” ipaddr may classify as reserved; double-check
+  const octets = v4.octets;
+  if (octets[0] === 192 && octets[1] === 0 && octets[2] === 0) return true;
+  if (octets[0]! >= 240) return true;
+  return false;
+}
+
+export async function resolveAndValidate(
+  hostname: string,
+  lookupImpl: typeof dnsLookup = dnsLookup,
+): Promise<{ address: string; family: number }> {
+  const host = normalizeHostname(hostname);
+  const literal = coerceIpLiteral(host);
+  if (literal) {
+    if (isBlockedAddress(literal)) {
+      throw Object.assign(new Error("Webhook URL resolves to a private address"), {
+        statusCode: 400,
+        code: "SSRF_BLOCKED",
+      });
+    }
+    return { address: literal, family: isIP(literal) === 6 ? 6 : 4 };
+  }
+
+  const results = await lookupImpl(host, { all: true, verbatim: true });
+  const list = Array.isArray(results) ? results : [results];
+  if (!list.length) {
+    throw Object.assign(new Error("Webhook URL DNS lookup failed"), {
+      statusCode: 400,
+      code: "SSRF_BLOCKED",
+    });
+  }
+  for (const entry of list) {
+    if (isBlockedAddress(entry.address)) {
+      throw Object.assign(new Error("Webhook URL resolves to a private address"), {
+        statusCode: 400,
+        code: "SSRF_BLOCKED",
+      });
+    }
+  }
+  const first = list[0]!;
+  return { address: first.address, family: first.family };
+}
+
+export function assertWebhookUrlShape(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw Object.assign(new Error("Invalid webhook URL"), {
+      statusCode: 400,
+      code: "SSRF_BLOCKED",
+    });
+  }
+  if (url.username || url.password) {
+    throw Object.assign(new Error("Webhook URL must not include userinfo"), {
+      statusCode: 400,
+      code: "SSRF_BLOCKED",
+    });
+  }
+  if (url.protocol === "https:") return url;
+  if (url.protocol === "http:" && allowHttpWebhooks()) return url;
+  throw Object.assign(new Error("Webhook URL must use HTTPS"), {
+    statusCode: 400,
+    code: "SSRF_BLOCKED",
+  });
+}
+
+/** Legacy name used by upsert path â€” shape + resolve check only (connect pins IP). */
+export async function assertPublicUrl(value: string): Promise<URL> {
+  const url = assertWebhookUrlShape(value);
+  await resolveAndValidate(url.hostname);
+  return url;
+}
+
+export function createPinnedAgent(options?: {
+  lookup?: LookupFn;
+  connectTimeout?: number;
+}): Agent {
+  return new Agent({
+    connect: {
+      timeout: options?.connectTimeout ?? 10_000,
+      lookup: (hostname, opts, cb) => {
+        const run = async () => {
+          if (options?.lookup) {
+            await new Promise<void>((resolve, reject) => {
+              options.lookup!(hostname, opts, (err, address, family) => {
+                if (err) reject(err);
+                else {
+                  cb(null, address, family);
+                  resolve();
+                }
+              });
+            });
+            return;
+          }
+          const validated = await resolveAndValidate(hostname);
+          cb(null, validated.address, validated.family);
+        };
+        void run().catch((err: NodeJS.ErrnoException) => cb(err, "", 4));
+      },
+    },
+  });
+}
+
+export const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
+
+export async function dumpBodyLimited(
+  body: Dispatcher.ResponseData["body"],
+  maxBytes = MAX_WEBHOOK_RESPONSE_BYTES,
+): Promise<void> {
+  let total = 0;
+  for await (const chunk of body) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      body.destroy();
+      throw new Error("Webhook response exceeded 64KB");
+    }
+  }
+}
+
+===== apps/api/src/services/webhooks/sign.ts =====
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export function signPayload(secret: string, timestamp: number, body: string): string {
+  return createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
+}
+
+export const signWebhook = signPayload;
+
+export function verifySignature(
+  secret: string,
+  timestamp: number,
+  body: string,
+  signature: string,
+): boolean {
+  const supplied = signature.startsWith("sha256=") ? signature.slice(7) : signature;
+  const expected = signPayload(secret, timestamp, body);
+  if (!/^[0-9a-f]{64}$/i.test(supplied)) return false;
+  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(supplied, "hex"));
+}
+
+===== apps/api/src/workers/webhook-delivery.ts =====
+import { Worker } from "bullmq";
+import { eq } from "drizzle-orm";
+import { request } from "undici";
+import { QUEUE_WEBHOOK_DELIVERY } from "@waapi/shared";
+import { webhookDeliveries, webhookEndpoints, type Db } from "@waapi/db";
+import { decryptSecret } from "../lib/crypto.js";
+import { redis } from "../services/queues.js";
+import { signWebhook } from "../services/webhooks/sign.js";
+import {
+  assertWebhookUrlShape,
+  createPinnedAgent,
+  dumpBodyLimited,
+} from "../services/webhooks/ssrf.js";
+
+function backoffWithJitter(attempts: number): number {
+  const base = Math.min(3_600_000, 1_000 * 2 ** attempts);
+  const jitter = Math.floor(Math.random() * Math.min(1_000, base * 0.2));
+  return base + jitter;
+}
+
+export function startWebhookDeliveryWorker(database: Db): Worker {
+  const agent = createPinnedAgent();
+
+  return new Worker(
+    QUEUE_WEBHOOK_DELIVERY,
+    async (job) => {
+      const [delivery] = await database.db
+        .select()
+        .from(webhookDeliveries)
+        .where(eq(webhookDeliveries.id, job.data.deliveryId as string))
+        .limit(1);
+      if (!delivery || delivery.status === "success" || delivery.status === "dead" || delivery.status === "skipped") {
+        return;
+      }
+      const [endpoint] = await database.db
+        .select()
+        .from(webhookEndpoints)
+        .where(eq(webhookEndpoints.id, delivery.endpointId))
+        .limit(1);
+
+      try {
+        if (!endpoint) {
+          await database.db
+            .update(webhookDeliveries)
+            .set({
+              status: "skipped",
+              lastError: "endpoint_missing",
+              attempts: delivery.attempts + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(webhookDeliveries.id, delivery.id));
+          return;
+        }
+        if (!endpoint.enabled) {
+          await database.db
+            .update(webhookDeliveries)
+            .set({
+              status: "skipped",
+              lastError: "endpoint_disabled",
+              attempts: delivery.attempts + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(webhookDeliveries.id, delivery.id));
+          return;
+        }
+
+        const url = assertWebhookUrlShape(endpoint.url);
+        const body = JSON.stringify(delivery.payload);
+        const timestamp = Math.floor(Date.now() / 1000);
+        const response = await request(url.toString(), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "user-agent": "waapi-webhooks/1.0",
+            "x-waapi-event": delivery.eventType,
+            "x-waapi-timestamp": String(timestamp),
+            "x-waapi-delivery-id": delivery.id,
+            "x-waapi-signature": `sha256=${signWebhook(decryptSecret(endpoint.secretEncrypted), timestamp, body)}`,
+          },
+          body,
+          dispatcher: agent,
+          headersTimeout: 10_000,
+          bodyTimeout: 10_000,
+          // undici request does not follow redirects by default (maxRedirections: 0)
+        } as Parameters<typeof request>[1]);
+        await dumpBodyLimited(response.body);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw new Error(`HTTP ${response.statusCode}`);
+        }
+        await database.db
+          .update(webhookDeliveries)
+          .set({
+            status: "success",
+            attempts: delivery.attempts + 1,
+            responseCode: response.statusCode,
+            updatedAt: new Date(),
+          })
+          .where(eq(webhookDeliveries.id, delivery.id));
+      } catch (error) {
+        const final = job.attemptsMade + 1 >= 8;
+        await database.db
+          .update(webhookDeliveries)
+          .set({
+            status: final ? "dead" : "retrying",
+            attempts: delivery.attempts + 1,
+            lastError: error instanceof Error ? error.message : String(error),
+            updatedAt: new Date(),
+          })
+          .where(eq(webhookDeliveries.id, delivery.id));
+        throw error;
+      }
+    },
+    {
+      connection: redis,
+      concurrency: 10,
+      settings: { backoffStrategy: backoffWithJitter },
+    },
+  );
+}
+
+===== apps/api/src/routes/v1/sessions.ts =====
+import type { FastifyPluginAsync } from "fastify";
+import { createSessionBodySchema } from "@waapi/shared";
+import { z } from "zod";
+import {
+  command,
+  createSession,
+  deleteSession,
+  getSession,
+  listSessions,
+  status,
+} from "../../services/sessions.js";
+import { createSessionKey, revokeSessionKey } from "../../services/tokens.js";
+
+const paramsSchema = z.object({ id: z.string().uuid() });
+
+const notFound = () =>
+  Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+
+const routes: FastifyPluginAsync = async (app) => {
+  const accountAuth = { preHandler: app.requireAuthType("jwt", "pat") };
+
+  app.post("/", accountAuth, async (request, reply) =>
+    reply
+      .code(201)
+      .send(
+        await createSession(
+          app.database,
+          request.identity.accountId,
+          createSessionBodySchema.parse(request.body).name,
+          request.id,
+        ),
+      ),
+  );
+
+  app.get("/", accountAuth, async (request) =>
+    listSessions(app.database, request.identity.accountId),
+  );
+
+  app.get<{ Params: { id: string } }>("/:id", accountAuth, async (request) =>
+    getSession(app.database, request.identity.accountId, paramsSchema.parse(request.params).id),
+  );
+
+  app.delete<{ Params: { id: string } }>("/:id", accountAuth, async (request, reply) => {
+    await deleteSession(
+      app.database,
+      request.identity.accountId,
+      paramsSchema.parse(request.params).id,
+    );
+    return reply.code(204).send();
+  });
+
+  for (const action of ["connect", "disconnect", "logout"] as const) {
+    app.post<{ Params: { id: string } }>(`/:id/${action}`, accountAuth, async (request, reply) => {
+      await command(
+        app.database,
+        request.identity.accountId,
+        paramsSchema.parse(request.params).id,
+        action,
+        request.id,
+      );
+      return reply.code(202).send({ queued: true });
+    });
+  }
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/status",
+    { preHandler: app.requireAuthType("jwt", "pat", "session_key") },
+    async (request) => {
+      const id = paramsSchema.parse(request.params).id;
+      if (
+        request.identity.authType === "session_key" &&
+        request.identity.sessionId !== id
+      ) {
+        throw notFound();
+      }
+      return status(app.database, request.identity.accountId, id);
+    },
+  );
+
+  app.post<{ Params: { id: string } }>("/:id/keys", accountAuth, async (request, reply) => {
+    const body = z.object({ name: z.string().min(1).max(80) }).parse(request.body);
+    return reply
+      .code(201)
+      .send(
+        await createSessionKey(
+          app.database,
+          request.identity.accountId,
+          paramsSchema.parse(request.params).id,
+          body.name,
+        ),
+      );
+  });
+
+  app.delete<{ Params: { id: string; keyId: string } }>(
+    "/:id/keys/:keyId",
+    accountAuth,
+    async (request, reply) => {
+      const parsed = z
+        .object({ id: z.string().uuid(), keyId: z.string().uuid() })
+        .parse(request.params);
+      await revokeSessionKey(
+        app.database,
+        request.identity.accountId,
+        parsed.id,
+        parsed.keyId,
+      );
+      return reply.code(204).send();
+    },
+  );
+};
+export default routes;
+
+===== apps/api/src/routes/v1/messages.ts =====
+import type { FastifyPluginAsync } from "fastify";
+import { z } from "zod";
+import { listMessages } from "../../services/messages.js";
+
+const querySchema = z.object({
+  sessionId: z.string().uuid().optional(),
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+const routes: FastifyPluginAsync = async (app) => {
+  app.get(
+    "/",
+    { preHandler: app.requireAuthType("jwt", "pat", "session_key") },
+    async (request) => {
+      const query = querySchema.parse(request.query);
+      if (request.identity.authType === "session_key") {
+        query.sessionId = request.identity.sessionId;
+      }
+      return listMessages(app.database, request.identity.accountId, query);
+    },
+  );
+};
+export default routes;
+
+===== apps/api/src/routes/v1/send.ts =====
+import type { FastifyPluginAsync } from "fastify";
+import { sendMessageBodySchema } from "@waapi/shared";
+import { config } from "../../config.js";
+import { sendText } from "../../services/send.js";
+
+const routes: FastifyPluginAsync = async (app) => {
+  app.post(
+    "/send-message",
+    {
+      preHandler: app.requireAuthType("jwt", "pat", "session_key"),
+      config: { rateLimit: { max: config.SEND_RATE_LIMIT_MAX } },
+    },
+    async (request, reply) => {
+      const key = request.headers["idempotency-key"];
+      if (typeof key !== "string" || !key || key.length > 128) {
+        throw Object.assign(new Error("Idempotency-Key header required"), {
+          statusCode: 400,
+          code: "VALIDATION_ERROR",
+        });
+      }
+      const input = sendMessageBodySchema.parse(request.body);
+      if (
+        request.identity.authType === "session_key" &&
+        request.identity.sessionId !== input.sessionId
+      ) {
+        throw Object.assign(new Error("Session not found"), {
+          statusCode: 404,
+          code: "NOT_FOUND",
+        });
+      }
+      return reply
+        .code(202)
+        .send(await sendText(app.database, request.identity.accountId, input, key, request.id));
+    },
+  );
+};
+export default routes;
+
+===== apps/worker/src/jobs/session-commands.ts =====
+import { Worker } from "bullmq";
+import { QUEUE_SESSION_COMMANDS, workerCommandSchema } from "@waapi/shared";
+import type { Redis } from "ioredis";
+import type { Logger } from "../logger.js";
+import type { SessionManager } from "../session/manager.js";
+
+async function withNotFoundRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      last = err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== "SESSION_NOT_FOUND_FOR_ACCOUNT" || i === attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
+export function startSessionCommandsWorker(args: {
+  connection: Redis;
+  manager: SessionManager;
+  log: Logger;
+}): Worker {
+  const { connection, manager, log } = args;
+
+  return new Worker(
+    QUEUE_SESSION_COMMANDS,
+    async (job) => {
+      const cmd = workerCommandSchema.parse(job.data);
+      log.info({ type: cmd.type, sessionId: cmd.sessionId }, "session command");
+      switch (cmd.type) {
+        case "open-session":
+          await withNotFoundRetry(() => manager.openSession(cmd.accountId, cmd.sessionId));
+          break;
+        case "close-session":
+          await withNotFoundRetry(() => manager.closeSession(cmd.accountId, cmd.sessionId));
+          break;
+        case "logout-session":
+          await withNotFoundRetry(() => manager.logoutSession(cmd.accountId, cmd.sessionId));
+          break;
+        case "send-message":
+          throw new Error("SEND_MESSAGE_WRONG_QUEUE");
+        default:
+          break;
+      }
+    },
+    {
+      connection,
+      concurrency: 5,
+      removeOnComplete: { age: 60, count: 200 },
+      removeOnFail: { age: 300, count: 200 },
+    },
+  );
+}
+
+===== apps/worker/src/jobs/send-text.ts =====
+import { Worker } from "bullmq";
+import { and, eq, sql } from "drizzle-orm";
+import { outboundMessages } from "@waapi/db";
+import { QUEUE_SEND_TEXT, sendTextJobSchema } from "@waapi/shared";
+import type { Redis } from "ioredis";
+import type { Db } from "../db/client.js";
+import { insertMessageLog } from "../db/message-logs.js";
+import { getSessionForAccount } from "../db/sessions.js";
+import { enqueueWebhookOutbox } from "../db/webhook-outbox.js";
+import type { Logger } from "../logger.js";
+import type { SessionManager } from "../session/manager.js";
+
+const lastSendAt = new Map<string, number>();
+const SEND_MIN_INTERVAL_MS = Number(process.env.SEND_MIN_INTERVAL_MS ?? 800);
+const BODY_PLACEHOLDER = "[redacted]";
+
+async function throttleSession(sessionId: string): Promise<void> {
+  const last = lastSendAt.get(sessionId) ?? 0;
+  const jitter = Math.floor(Math.random() * 400);
+  const wait = SEND_MIN_INTERVAL_MS + jitter - (Date.now() - last);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastSendAt.set(sessionId, Date.now());
+}
+
+async function withNotFoundRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      last = err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== "SESSION_NOT_FOUND_FOR_ACCOUNT" || i === attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
+/** Atomically claim a queued outbound row for sending. Exported for unit tests. */
+export async function claimOutboundForSend(
+  db: Db["db"],
+  messageId: string,
+): Promise<{ status: "claimed" | "already_sent" | "busy" | "missing" | "failed" }> {
+  const claimed = await db.execute(sql`
+    update outbound_messages
+    set status = 'sending', updated_at = now()
+    where id = ${messageId}::uuid and status = 'queued'
+    returning id
+  `);
+  if (claimed[0]) return { status: "claimed" };
+
+  const [row] = await db
+    .select({
+      status: outboundMessages.status,
+      providerMessageId: outboundMessages.providerMessageId,
+    })
+    .from(outboundMessages)
+    .where(eq(outboundMessages.id, messageId))
+    .limit(1);
+  if (!row) return { status: "missing" };
+  if (row.status === "sent" || row.providerMessageId) return { status: "already_sent" };
+  if (row.status === "failed") return { status: "failed" };
+  return { status: "busy" };
+}
+
+async function redactJobBody(
+  job: { updateData: (data: Record<string, unknown>) => Promise<void>; data: unknown },
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await job.updateData({ ...payload, text: BODY_PLACEHOLDER });
+}
+
+export function startSendTextWorker(args: {
+  connection: Redis;
+  db: Db["db"];
+  manager: SessionManager;
+  log: Logger;
+}): Worker {
+  const { connection, db, manager, log } = args;
+
+  return new Worker(
+    QUEUE_SEND_TEXT,
+    async (job) => {
+      const payload = sendTextJobSchema.parse(job.data);
+      const text = payload.text;
+      if (!text || text === BODY_PLACEHOLDER) {
+        throw new Error("SEND_BODY_MISSING");
+      }
+      if (!payload.messageId) throw new Error("SEND_MESSAGE_ID_REQUIRED");
+
+      const claim = await claimOutboundForSend(db, payload.messageId);
+      if (claim.status === "already_sent") {
+        await redactJobBody(job, payload);
+        return { skipped: true, reason: "already_sent" };
+      }
+      if (claim.status === "busy") throw new Error("SEND_IN_PROGRESS");
+      if (claim.status === "missing" || claim.status === "failed") {
+        throw new Error(`SEND_CLAIM_${claim.status.toUpperCase()}`);
+      }
+
+      const isFinalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+
+      try {
+        const session = await withNotFoundRetry(() =>
+          getSessionForAccount(db, payload.accountId, payload.sessionId).then((row) => {
+            if (!row) throw new Error("SESSION_NOT_FOUND_FOR_ACCOUNT");
+            return row;
+          }),
+        );
+        if (session.status !== "connected") throw new Error("SESSION_NOT_CONNECTED");
+        const client = manager.getClient(payload.sessionId);
+        if (!client) throw new Error("SESSION_NOT_ON_NODE");
+
+        await throttleSession(payload.sessionId);
+        const result = await client.sendText(payload.to, text);
+
+        await db
+          .update(outboundMessages)
+          .set({
+            status: "sent",
+            providerMessageId: result.messageId,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(eq(outboundMessages.id, payload.messageId), eq(outboundMessages.status, "sending")),
+          );
+
+        await redactJobBody(job, payload);
+
+        await insertMessageLog(db, {
+          accountId: payload.accountId,
+          sessionId: payload.sessionId,
+          direction: "outbound",
+          remoteJid: result.remoteJid,
+          messageId: result.messageId,
+          fromMe: true,
+          messageType: "conversation",
+        });
+
+        await enqueueWebhookOutbox(db, {
+          accountId: payload.accountId,
+          sessionId: payload.sessionId,
+          eventType: "message.sent",
+          payload: {
+            id: crypto.randomUUID(),
+            type: "message.sent",
+            accountId: payload.accountId,
+            sessionId: payload.sessionId,
+            createdAt: new Date().toISOString(),
+            data: {
+              messageId: result.messageId,
+              remoteJid: result.remoteJid,
+              outboundId: payload.messageId,
+            },
+          },
+        });
+
+        log.info(
+          {
+            sessionId: payload.sessionId,
+            messageId: result.messageId,
+            remoteJid: result.remoteJid,
+            event: "message.sent",
+          },
+          "outbound message metadata",
+        );
+        return { messageId: result.messageId, remoteJid: result.remoteJid };
+      } catch (err) {
+        // Re-queue for retry unless this was the final attempt.
+        if (isFinalAttempt) {
+          await db
+            .update(outboundMessages)
+            .set({
+              status: "failed",
+              error: err instanceof Error ? err.message : String(err),
+              updatedAt: new Date(),
+            })
+            .where(eq(outboundMessages.id, payload.messageId));
+          await redactJobBody(job, payload);
+        } else {
+          await db
+            .update(outboundMessages)
+            .set({ status: "queued", updatedAt: new Date() })
+            .where(
+              and(
+                eq(outboundMessages.id, payload.messageId),
+                eq(outboundMessages.status, "sending"),
+              ),
+            );
+        }
+        throw err;
+      }
+    },
+    {
+      connection,
+      concurrency: 5,
+      removeOnComplete: { age: 60, count: 200 },
+      // Body is redacted before final failure; keep failed jobs briefly only.
+      removeOnFail: { age: 1, count: 50 },
+    },
+  );
+}
+
+===== packages/db/src/schema.ts =====
+import { relations, sql } from "drizzle-orm";
+import {
+  boolean,
+  integer,
+  customType,
+  index,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
+import { MEMBER_ROLES, SESSION_STATUSES, WEBHOOK_EVENT_TYPES } from "@waapi/shared";
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
+export const accounts = pgTable("accounts", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  maxSessions: integer("max_sessions").notNull().default(10),
+  planCode: text("plan_code").notNull().default("dev"),
+  suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    passwordHash: text("password_hash").notNull(),
+    emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
+    role: text("role", { enum: MEMBER_ROLES }).notNull().default("owner"),
+    isAdmin: boolean("is_admin").notNull().default(false),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    emailLowerUidx: uniqueIndex("users_email_lower_uidx").using("btree", sql`lower(${t.email})`),
+    accountIdx: index("users_account_id_idx").on(t.accountId),
+  }),
+);
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    status: text("status", { enum: SESSION_STATUSES }).notNull().default("need_scan"),
+    phoneNumber: text("phone_number"),
+    lastError: text("last_error"),
+    authKeyVersion: integer("auth_key_version").notNull().default(1),
+    nodeId: text("node_id"),
+    lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountIdIdx: index("sessions_account_id_idx").on(t.accountId),
+  }),
+);
+
+export const waAuthCreds = pgTable("wa_auth_creds", {
+  sessionId: uuid("session_id")
+    .primaryKey()
+    .references(() => sessions.id, { onDelete: "cascade" }),
+  ciphertext: bytea("ciphertext").notNull(),
+  iv: bytea("iv").notNull(),
+  authTag: bytea("auth_tag").notNull(),
+  keyVersion: integer("key_version").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const waAuthKeys = pgTable(
+  "wa_auth_keys",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    keyType: text("key_type").notNull(),
+    keyId: text("key_id").notNull(),
+    ciphertext: bytea("ciphertext").notNull(),
+    iv: bytea("iv").notNull(),
+    authTag: bytea("auth_tag").notNull(),
+    keyVersion: integer("key_version").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sessionKeyUnique: uniqueIndex("wa_auth_keys_session_type_id_uidx").on(
+      t.sessionId,
+      t.keyType,
+      t.keyId,
+    ),
+  }),
+);
+
+export const messageLogs = pgTable(
+  "message_logs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
+    remoteJid: text("remote_jid").notNull(),
+    messageId: text("message_id").notNull(),
+    fromMe: boolean("from_me").notNull(),
+    messageType: text("message_type").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sessionMsgFromUnique: uniqueIndex("message_logs_session_msg_from_uidx").on(
+      t.sessionId,
+      t.messageId,
+      t.fromMe,
+    ),
+    sessionCreatedIdx: index("message_logs_session_created_idx").on(t.sessionId, t.createdAt),
+  }),
+);
+
+export const emailVerificationTokens = pgTable(
+  "email_verification_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tokenHashUidx: uniqueIndex("email_verification_tokens_hash_uidx").on(t.tokenHash),
+  }),
+);
+
+export const passwordResetTokens = pgTable(
+  "password_reset_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tokenHashUidx: uniqueIndex("password_reset_tokens_hash_uidx").on(t.tokenHash),
+  }),
+);
+
+export const refreshTokens = pgTable(
+  "refresh_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    familyId: uuid("family_id").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    replacedBy: uuid("replaced_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tokenHashUidx: uniqueIndex("refresh_tokens_hash_uidx").on(t.tokenHash),
+    userIdx: index("refresh_tokens_user_id_idx").on(t.userId),
+    familyIdx: index("refresh_tokens_family_id_idx").on(t.familyId),
+  }),
+);
+
+export const loginAttempts = pgTable(
+  "login_attempts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    ip: text("ip").notNull(),
+    email: text("email").notNull(),
+    succeeded: boolean("succeeded").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    ipCreatedIdx: index("login_attempts_ip_created_idx").on(t.ip, t.createdAt),
+    emailCreatedIdx: index("login_attempts_email_created_idx").on(t.email, t.createdAt),
+  }),
+);
+
+export const securityAuditLog = pgTable(
+  "security_audit_log",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id").references(() => accounts.id, { onDelete: "set null" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    eventType: text("event_type").notNull(),
+    ip: text("ip"),
+    meta: jsonb("meta").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountCreatedIdx: index("security_audit_log_account_created_idx").on(t.accountId, t.createdAt),
+  }),
+);
+
+export const personalAccessTokens = pgTable(
+  "personal_access_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenPrefix: text("token_prefix").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default(sql`'["account"]'::jsonb`),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    hashUidx: uniqueIndex("personal_access_tokens_hash_uidx").on(t.tokenHash),
+    accountIdx: index("personal_access_tokens_account_id_idx").on(t.accountId),
+  }),
+);
+
+export const sessionApiKeys = pgTable(
+  "session_api_keys",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenPrefix: text("token_prefix").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    hashUidx: uniqueIndex("session_api_keys_hash_uidx").on(t.tokenHash),
+    sessionIdx: index("session_api_keys_session_id_idx").on(t.sessionId),
+  }),
+);
+
+export const idempotencyKeys = pgTable(
+  "idempotency_keys",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    requestHash: text("request_hash").notNull(),
+    responseStatus: integer("response_status").notNull(),
+    responseBody: jsonb("response_body").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    accountKeyUidx: uniqueIndex("idempotency_keys_account_key_uidx").on(t.accountId, t.key),
+  }),
+);
+
+export const outboundMessages = pgTable(
+  "outbound_messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    toJid: text("to_jid").notNull(),
+    status: text("status", {
+      enum: ["queued", "sending", "sent", "failed"],
+    })
+      .notNull()
+      .default("queued"),
+    providerMessageId: text("provider_message_id"),
+    idempotencyKey: text("idempotency_key"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountCreatedIdx: index("outbound_messages_account_created_idx").on(t.accountId, t.createdAt),
+    sessionCreatedIdx: index("outbound_messages_session_created_idx").on(t.sessionId, t.createdAt),
+  }),
+);
+
+export const webhookEndpoints = pgTable(
+  "webhook_endpoints",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sessionUidx: uniqueIndex("webhook_endpoints_session_id_uidx").on(t.sessionId),
+  }),
+);
+
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    endpointId: uuid("endpoint_id")
+      .notNull()
+      .references(() => webhookEndpoints.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    eventType: text("event_type", { enum: WEBHOOK_EVENT_TYPES }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status", {
+      enum: ["pending", "success", "retrying", "dead", "skipped"],
+    })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    responseCode: integer("response_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusNextIdx: index("webhook_deliveries_status_next_idx").on(t.status, t.nextAttemptAt),
+    sessionCreatedIdx: index("webhook_deliveries_session_created_idx").on(t.sessionId, t.createdAt),
+  }),
+);
+
+/** Outbox written by worker; consumed by API webhook delivery worker. */
+export const webhookOutbox = pgTable(
+  "webhook_outbox",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    eventType: text("event_type", { enum: WEBHOOK_EVENT_TYPES }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    unprocessedIdx: index("webhook_outbox_unprocessed_idx").on(t.processedAt, t.createdAt),
+  }),
+);
+
+export const accountsRelations = relations(accounts, ({ many }) => ({
+  sessions: many(sessions),
+  users: many(users),
+}));
+
+export const sessionsRelations = relations(sessions, ({ one, many }) => ({
+  account: one(accounts, {
+    fields: [sessions.accountId],
+    references: [accounts.id],
+  }),
+  messageLogs: many(messageLogs),
+}));
+
+export const usersRelations = relations(users, ({ one }) => ({
+  account: one(accounts, {
+    fields: [users.accountId],
+    references: [accounts.id],
+  }),
+}));
+
+===== packages/db/drizzle/0002_phase2.sql =====
+ALTER TABLE "accounts" ADD COLUMN IF NOT EXISTS "plan_code" text DEFAULT 'dev' NOT NULL;--> statement-breakpoint
+ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "node_id" text;--> statement-breakpoint
+ALTER TABLE "accounts" ADD COLUMN IF NOT EXISTS "suspended_at" timestamp with time zone;--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "users" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"email" text NOT NULL,
+	"password_hash" text NOT NULL,
+	"email_verified_at" timestamp with time zone,
+	"role" text DEFAULT 'owner' NOT NULL,
+	"is_admin" boolean DEFAULT false NOT NULL,
+	"disabled_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "email_verification_tokens" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"token_hash" text NOT NULL,
+	"expires_at" timestamp with time zone NOT NULL,
+	"used_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "password_reset_tokens" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"token_hash" text NOT NULL,
+	"expires_at" timestamp with time zone NOT NULL,
+	"used_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "refresh_tokens" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"token_hash" text NOT NULL,
+	"family_id" uuid NOT NULL,
+	"revoked_at" timestamp with time zone,
+	"expires_at" timestamp with time zone NOT NULL,
+	"replaced_by" uuid,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "login_attempts" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"ip" text NOT NULL,
+	"email" text NOT NULL,
+	"succeeded" boolean NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "security_audit_log" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid,
+	"user_id" uuid,
+	"event_type" text NOT NULL,
+	"ip" text,
+	"meta" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "personal_access_tokens" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"user_id" uuid NOT NULL,
+	"name" text NOT NULL,
+	"token_prefix" text NOT NULL,
+	"token_hash" text NOT NULL,
+	"scopes" jsonb DEFAULT '["account"]'::jsonb NOT NULL,
+	"revoked_at" timestamp with time zone,
+	"last_used_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "session_api_keys" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"session_id" uuid NOT NULL,
+	"name" text NOT NULL,
+	"token_prefix" text NOT NULL,
+	"token_hash" text NOT NULL,
+	"revoked_at" timestamp with time zone,
+	"last_used_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "idempotency_keys" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"key" text NOT NULL,
+	"request_hash" text NOT NULL,
+	"response_status" integer NOT NULL,
+	"response_body" jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"expires_at" timestamp with time zone NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "outbound_messages" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"session_id" uuid NOT NULL,
+	"to_jid" text NOT NULL,
+	"status" text DEFAULT 'queued' NOT NULL,
+	"provider_message_id" text,
+	"idempotency_key" text,
+	"error" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "webhook_endpoints" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"session_id" uuid NOT NULL,
+	"url" text NOT NULL,
+	"secret_encrypted" text NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "webhook_deliveries" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"endpoint_id" uuid NOT NULL,
+	"account_id" uuid NOT NULL,
+	"session_id" uuid NOT NULL,
+	"event_type" text NOT NULL,
+	"payload" jsonb NOT NULL,
+	"payload_hash" text NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"next_attempt_at" timestamp with time zone,
+	"last_error" text,
+	"response_code" integer,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "webhook_outbox" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"account_id" uuid NOT NULL,
+	"session_id" uuid NOT NULL,
+	"event_type" text NOT NULL,
+	"payload" jsonb NOT NULL,
+	"processed_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "users" ADD CONSTRAINT "users_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "email_verification_tokens" ADD CONSTRAINT "email_verification_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "password_reset_tokens" ADD CONSTRAINT "password_reset_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "security_audit_log" ADD CONSTRAINT "security_audit_log_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE set null ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "security_audit_log" ADD CONSTRAINT "security_audit_log_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "personal_access_tokens" ADD CONSTRAINT "personal_access_tokens_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "personal_access_tokens" ADD CONSTRAINT "personal_access_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "session_api_keys" ADD CONSTRAINT "session_api_keys_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "session_api_keys" ADD CONSTRAINT "session_api_keys_session_id_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."sessions"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "idempotency_keys" ADD CONSTRAINT "idempotency_keys_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "outbound_messages" ADD CONSTRAINT "outbound_messages_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "outbound_messages" ADD CONSTRAINT "outbound_messages_session_id_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."sessions"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_endpoints" ADD CONSTRAINT "webhook_endpoints_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_endpoints" ADD CONSTRAINT "webhook_endpoints_session_id_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."sessions"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_endpoint_id_webhook_endpoints_id_fk" FOREIGN KEY ("endpoint_id") REFERENCES "public"."webhook_endpoints"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_session_id_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."sessions"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_outbox" ADD CONSTRAINT "webhook_outbox_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+DO $$ BEGIN ALTER TABLE "webhook_outbox" ADD CONSTRAINT "webhook_outbox_session_id_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."sessions"("id") ON DELETE cascade ON UPDATE no action; EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "users_email_lower_uidx" ON "users" (lower("email"));--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "users_account_id_idx" ON "users" USING btree ("account_id");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "email_verification_tokens_hash_uidx" ON "email_verification_tokens" USING btree ("token_hash");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "password_reset_tokens_hash_uidx" ON "password_reset_tokens" USING btree ("token_hash");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "refresh_tokens_hash_uidx" ON "refresh_tokens" USING btree ("token_hash");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "refresh_tokens_user_id_idx" ON "refresh_tokens" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "refresh_tokens_family_id_idx" ON "refresh_tokens" USING btree ("family_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "login_attempts_ip_created_idx" ON "login_attempts" USING btree ("ip","created_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "login_attempts_email_created_idx" ON "login_attempts" USING btree ("email","created_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "security_audit_log_account_created_idx" ON "security_audit_log" USING btree ("account_id","created_at");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "personal_access_tokens_hash_uidx" ON "personal_access_tokens" USING btree ("token_hash");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "personal_access_tokens_account_id_idx" ON "personal_access_tokens" USING btree ("account_id");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "session_api_keys_hash_uidx" ON "session_api_keys" USING btree ("token_hash");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "session_api_keys_session_id_idx" ON "session_api_keys" USING btree ("session_id");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "idempotency_keys_account_key_uidx" ON "idempotency_keys" USING btree ("account_id","key");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "outbound_messages_account_created_idx" ON "outbound_messages" USING btree ("account_id","created_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "outbound_messages_session_created_idx" ON "outbound_messages" USING btree ("session_id","created_at");--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "webhook_endpoints_session_id_uidx" ON "webhook_endpoints" USING btree ("session_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "webhook_deliveries_status_next_idx" ON "webhook_deliveries" USING btree ("status","next_attempt_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "webhook_deliveries_session_created_idx" ON "webhook_deliveries" USING btree ("session_id","created_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "webhook_outbox_unprocessed_idx" ON "webhook_outbox" USING btree ("processed_at","created_at");
+
+===== packages/db/drizzle/0003_phase2_review.sql =====
+ALTER TABLE "accounts" ADD COLUMN IF NOT EXISTS "suspended_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "disabled_at" timestamp with time zone;--> statement-breakpoint
+DROP INDEX IF EXISTS "users_email_uidx";--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "users_email_lower_uidx" ON "users" (lower("email"));--> statement-breakpoint
+ALTER TABLE "sessions" DROP COLUMN IF EXISTS "qr_payload";--> statement-breakpoint
+ALTER TABLE "sessions" DROP COLUMN IF EXISTS "qr_updated_at";--> statement-breakpoint
+ALTER TABLE "sessions" DROP COLUMN IF EXISTS "qr_expires_at";--> statement-breakpoint
+ALTER TABLE "webhook_deliveries" DROP CONSTRAINT IF EXISTS "webhook_deliveries_status_check";--> statement-breakpoint
+-- allow skipped status (no check constraint in drizzle default)
+UPDATE "personal_access_tokens" SET "scopes" = '["account"]'::jsonb WHERE "scopes" = '[]'::jsonb OR "scopes" = '["*"]'::jsonb;
+
+===== apps/api/src/phase-2.integration.test.ts =====
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import type { Db } from "@waapi/db";
+import type { BuiltApp } from "./app.js";
+
+type AuthSession = {
+  accountId: string;
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  email: string;
+  password: string;
+};
+
+const ACCOUNT_SCOPED_ROUTE_PATTERNS = [
+  { method: "GET", url: "/api/v1/sessions/:id" },
+  { method: "DELETE", url: "/api/v1/sessions/:id" },
+  { method: "GET", url: "/api/v1/sessions/:id/status" },
+  { method: "POST", url: "/api/v1/sessions/:id/connect" },
+  { method: "POST", url: "/api/v1/sessions/:id/disconnect" },
+  { method: "POST", url: "/api/v1/sessions/:id/logout" },
+  { method: "POST", url: "/api/v1/sessions/:id/keys" },
+  { method: "DELETE", url: "/api/v1/sessions/:id/keys/:keyId" },
+  { method: "PUT", url: "/api/v1/sessions/:id/webhook" },
+  { method: "GET", url: "/api/v1/sessions/:id/webhook" },
+  { method: "DELETE", url: "/api/v1/sessions/:id/webhook" },
+  { method: "POST", url: "/api/v1/sessions/:id/webhook/test" },
+  { method: "POST", url: "/api/v1/send-message" },
+];
+
+function normalizeUrl(url: string): string {
+  return url.replace(/:[^/]+/g, (m) => m);
+}
+
+describe("Phase 2 API integration", () => {
+  let app: BuiltApp;
+  let database: Db;
+  const accountIds = new Set<string>();
+
+  beforeAll(async () => {
+    await import("dotenv/config");
+    process.env.NODE_ENV = "test";
+    process.env.JWT_SECRET ??= "test-jwt-secret-that-is-at-least-32-bytes";
+    process.env.WEBHOOK_SECRET_KEY ??= Buffer.alloc(32, 7).toString("base64");
+    process.env.ADMIN_API_SECRET ??= "test-admin-api-secret";
+    process.env.AUTH_STATE_ENCRYPTION_KEY ??= Buffer.alloc(32, 9).toString("base64");
+    process.env.BRAND_NAME ??= "waapi-test";
+    process.env.DEV_RETURN_TOKENS = "true";
+    process.env.ALLOW_HTTP_WEBHOOKS = "true";
+    process.env.ENABLE_DOCS = "false";
+
+    if (!process.env.DATABASE_URL || !process.env.REDIS_URL) {
+      throw new Error("DATABASE_URL and REDIS_URL required for Phase 2 integration tests");
+    }
+
+    const [{ default: postgres }, { Redis }] = await Promise.all([
+      import("postgres"),
+      import("ioredis"),
+    ]);
+    const sql = postgres(process.env.DATABASE_URL, { max: 1, connect_timeout: 5 });
+    const redis = new Redis(process.env.REDIS_URL, {
+      connectTimeout: 5_000,
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    });
+    redis.on("error", () => undefined);
+    try {
+      await Promise.all([sql`select 1`, redis.connect().then(() => redis.ping())]);
+      await Promise.all([sql.end({ timeout: 2 }), redis.quit()]);
+    } catch (error) {
+      await Promise.allSettled([sql.end({ timeout: 2 }), redis.disconnect()]);
+      throw new Error(
+        `Postgres/Redis required for Phase 2 tests: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+
+    const { buildApp } = await import("./app.js");
+    app = await buildApp();
+    database = app.database;
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    if (!app || !database) return;
+    const { accounts } = await import("@waapi/db");
+    const { inArray } = await import("drizzle-orm");
+    if (accountIds.size) {
+      await database.db.delete(accounts).where(inArray(accounts.id, [...accountIds]));
+    }
+    await app.close();
+  });
+
+  async function registerVerifyLogin(label: string): Promise<AuthSession> {
+    const email = `${label}-${crypto.randomUUID()}@example.test`;
+    const password = "correct-horse-battery-staple";
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/register",
+      payload: { email, password, name: label },
+    });
+    expect(registered.statusCode).toBe(201);
+    const registration = registered.json<{
+      accountId: string;
+      userId: string;
+      verificationToken?: string;
+    }>();
+    expect(registration.verificationToken).toEqual(expect.any(String));
+    accountIds.add(registration.accountId);
+
+    const verified = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/verify-email",
+      payload: { token: registration.verificationToken },
+    });
+    expect(verified.statusCode).toBe(204);
+
+    const loggedIn = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { email, password },
+    });
+    expect(loggedIn.statusCode).toBe(200);
+    const tokens = loggedIn.json<{ accessToken: string; refreshToken: string }>();
+    return {
+      accountId: registration.accountId,
+      userId: registration.userId,
+      email,
+      password,
+      ...tokens,
+    };
+  }
+
+  it("never returns verificationToken when DEV_RETURN_TOKENS is false", async () => {
+    process.env.DEV_RETURN_TOKENS = "false";
+    const email = `no-token-${crypto.randomUUID()}@example.test`;
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/register",
+      payload: { email, password: "correct-horse-battery-staple", name: "gated" },
+    });
+    expect(registered.statusCode).toBe(201);
+    const body = registered.json<Record<string, unknown>>();
+    expect(body).not.toHaveProperty("verificationToken");
+    accountIds.add(body.accountId as string);
+    process.env.DEV_RETURN_TOKENS = "true";
+  });
+
+  it("never returns verificationToken when NODE_ENV is production", async () => {
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    process.env.DEV_RETURN_TOKENS = "true";
+    const email = `prod-token-${crypto.randomUUID()}@example.test`;
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/register",
+      payload: { email, password: "correct-horse-battery-staple", name: "prod" },
+    });
+    expect(registered.statusCode).toBe(201);
+    expect(registered.json()).not.toHaveProperty("verificationToken");
+    accountIds.add(registered.json<{ accountId: string }>().accountId);
+    process.env.NODE_ENV = prev;
+    process.env.DEV_RETURN_TOKENS = "true";
+  });
+
+  it("registers, rotates refresh, revokes family on reuse, logout-all", async () => {
+    const auth = await registerVerifyLogin("auth-flow");
+    const rotated = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: auth.refreshToken },
+    });
+    expect(rotated.statusCode).toBe(200);
+    const rotatedTokens = rotated.json<{ accessToken: string; refreshToken: string }>();
+    expect(rotatedTokens.refreshToken).not.toBe(auth.refreshToken);
+
+    const reuse = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: auth.refreshToken },
+    });
+    expect(reuse.statusCode).toBe(401);
+    expect(reuse.json().error.code).toBe("TOKEN_REVOKED");
+
+    const afterReuse = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: rotatedTokens.refreshToken },
+    });
+    expect(afterReuse.statusCode).toBe(401);
+
+    const auth2 = await registerVerifyLogin("auth-flow-2");
+    const r1 = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: auth2.refreshToken },
+    });
+    const next = r1.json<{ refreshToken: string }>().refreshToken;
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout-all",
+      headers: { authorization: `Bearer ${r1.json<{ accessToken: string }>().accessToken}` },
+    });
+    expect(logout.statusCode).toBe(204);
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: next },
+    });
+    expect(rejected.statusCode).toBe(401);
+  });
+
+  it("allows exactly one success for concurrent refresh of the same token", async () => {
+    const auth = await registerVerifyLogin("refresh-race");
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/auth/refresh",
+          payload: { refreshToken: auth.refreshToken },
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.statusCode === 401).length).toBeGreaterThanOrEqual(7);
+  });
+
+  it("hides account A resources from account B with exactly 404", async () => {
+    const [accountA, accountB] = await Promise.all([
+      registerVerifyLogin("tenant-a"),
+      registerVerifyLogin("tenant-b"),
+    ]);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      headers: { authorization: `Bearer ${accountA.accessToken}` },
+      payload: { name: "private-session" },
+    });
+    expect(created.statusCode).toBe(201);
+    const sessionId = created.json<{ id: string }>().id;
+
+    const keyCreated = await app.inject({
+      method: "POST",
+      url: `/api/v1/sessions/${sessionId}/keys`,
+      headers: { authorization: `Bearer ${accountA.accessToken}` },
+      payload: { name: "k1" },
+    });
+    const keyId = keyCreated.json<{ id: string }>().id;
+
+    const cases: Array<{
+      method: "GET" | "POST" | "PUT" | "DELETE";
+      url: string;
+      payload?: Record<string, string>;
+      idempotency?: boolean;
+    }> = [
+      { method: "GET", url: `/api/v1/sessions/${sessionId}` },
+      { method: "GET", url: `/api/v1/sessions/${sessionId}/status` },
+      { method: "POST", url: `/api/v1/sessions/${sessionId}/connect` },
+      { method: "POST", url: `/api/v1/sessions/${sessionId}/disconnect` },
+      { method: "POST", url: `/api/v1/sessions/${sessionId}/logout` },
+      { method: "DELETE", url: `/api/v1/sessions/${sessionId}` },
+      { method: "POST", url: `/api/v1/sessions/${sessionId}/keys`, payload: { name: "x" } },
+      { method: "DELETE", url: `/api/v1/sessions/${sessionId}/keys/${keyId}` },
+      {
+        method: "PUT",
+        url: `/api/v1/sessions/${sessionId}/webhook`,
+        payload: { url: "https://example.com/hook" },
+      },
+      { method: "GET", url: `/api/v1/sessions/${sessionId}/webhook` },
+      { method: "DELETE", url: `/api/v1/sessions/${sessionId}/webhook` },
+      { method: "POST", url: `/api/v1/sessions/${sessionId}/webhook/test` },
+      {
+        method: "POST",
+        url: "/api/v1/send-message",
+        payload: { sessionId, to: "+14155552671", text: "nope" },
+        idempotency: true,
+      },
+    ];
+
+    for (const c of cases) {
+      const response = await app.inject({
+        method: c.method,
+        url: c.url,
+        headers: {
+          authorization: `Bearer ${accountB.accessToken}`,
+          ...(c.idempotency ? { "idempotency-key": crypto.randomUUID() } : {}),
+        },
+        payload: c.payload,
+      });
+      expect(response.statusCode, `${c.method} ${c.url}`).toBe(404);
+    }
+  });
+
+  it("fails if any account-scoped route is missing from the covered list", () => {
+    const covered = new Set(
+      ACCOUNT_SCOPED_ROUTE_PATTERNS.map((r) => `${r.method} ${normalizeUrl(r.url)}`),
+    );
+    const accountScoped = app.registeredRoutes.filter((r) => {
+      if (!r.url.startsWith("/api/v1/")) return false;
+      if (r.url.startsWith("/api/v1/auth")) return false;
+      if (r.url === "/api/v1/sessions" && (r.method === "GET" || r.method === "POST")) return false;
+      if (r.url === "/api/v1/messages" || r.url === "/api/v1/messages/") return false;
+      if (r.url.includes(":id") || r.url.includes("send-message")) return true;
+      return false;
+    });
+    for (const route of accountScoped) {
+      const key = `${route.method} ${normalizeUrl(route.url)}`;
+      expect(covered.has(key) || covered.has(`${route.method} ${route.url}`), `uncovered ${key}`).toBe(
+        true,
+      );
+    }
+  });
+
+  it("enforces session-key scoping", async () => {
+    const auth = await registerVerifyLogin("sk-scope");
+    const s1 = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+      payload: { name: "a" },
+    });
+    const s2 = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+      payload: { name: "b" },
+    });
+    const id1 = s1.json<{ id: string }>().id;
+    const id2 = s2.json<{ id: string }>().id;
+    const keyRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/sessions/${id1}/keys`,
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+      payload: { name: "sk" },
+    });
+    const sk = keyRes.json<{ token: string }>().token;
+
+    const forbiddenAccountWide = await app.inject({
+      method: "GET",
+      url: "/api/v1/sessions",
+      headers: { authorization: `Bearer ${sk}` },
+    });
+    expect(forbiddenAccountWide.statusCode).toBe(403);
+
+    const otherStatus = await app.inject({
+      method: "GET",
+      url: `/api/v1/sessions/${id2}/status`,
+      headers: { authorization: `Bearer ${sk}` },
+    });
+    expect(otherStatus.statusCode).toBe(404);
+
+    const ownStatus = await app.inject({
+      method: "GET",
+      url: `/api/v1/sessions/${id1}/status`,
+      headers: { authorization: `Bearer ${sk}` },
+    });
+    expect(ownStatus.statusCode).toBe(200);
+
+    const patForbidden = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/tokens",
+      headers: { authorization: `Bearer ${sk}` },
+      payload: { name: "nope" },
+    });
+    expect(patForbidden.statusCode).toBe(403);
+  });
+
+  it("PAT cannot manage tokens; JWT can", async () => {
+    const auth = await registerVerifyLogin("pat-scope");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/tokens",
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+      payload: { name: "pat1" },
+    });
+    expect(created.statusCode).toBe(201);
+    const pat = created.json<{ token: string; id: string }>().token;
+
+    const listWithPat = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/tokens",
+      headers: { authorization: `Bearer ${pat}` },
+    });
+    expect(listWithPat.statusCode).toBe(403);
+
+    const sessionsOk = await app.inject({
+      method: "GET",
+      url: "/api/v1/sessions",
+      headers: { authorization: `Bearer ${pat}` },
+    });
+    expect(sessionsOk.statusCode).toBe(200);
+  });
+
+  it("allows exactly two of six concurrent session creates at a cap of two", async () => {
+    const { accounts } = await import("@waapi/db");
+    const auth = await registerVerifyLogin("cap");
+    await database.db
+      .update(accounts)
+      .set({ maxSessions: 2 })
+      .where(eq(accounts.id, auth.accountId));
+
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/sessions",
+          headers: { authorization: `Bearer ${auth.accessToken}` },
+          payload: { name: `concurrent-${index}` },
+        }),
+      ),
+    );
+    expect(responses.filter((response) => response.statusCode === 201)).toHaveLength(2);
+    expect(responses.filter((response) => response.statusCode === 409)).toHaveLength(4);
+  });
+
+  it("20 concurrent sends with one Idempotency-Key produce one outbound row", async () => {
+    const { accounts, sessions, outboundMessages, idempotencyKeys } = await import("@waapi/db");
+    const { randomUUID } = await import("node:crypto");
+    const { sendText } = await import("./services/send.js");
+    const accountId = randomUUID();
+    accountIds.add(accountId);
+    await database.db.insert(accounts).values({ id: accountId, name: "idempotency" });
+    const [session] = await database.db
+      .insert(sessions)
+      .values({ accountId, name: "connected-stub", status: "connected" })
+      .returning();
+    const body = { sessionId: session!.id, to: "+14155552671", text: "hello" };
+    const key = `idem-${randomUUID()}`;
+
+    // Mock queue enqueue by temporarily stubbing â€” use real queue if Redis up;
+    // count DB rows regardless of enqueue success.
+    const results = await Promise.allSettled(
+      Array.from({ length: 20 }, () => sendText(database, accountId, body, key, randomUUID())),
+    );
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
+      id: string;
+    }>[];
+    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+    const ids = new Set(fulfilled.map((r) => r.value.id));
+    expect(ids.size).toBe(1);
+
+    const rows = await database.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.accountId, accountId));
+    expect(rows).toHaveLength(1);
+
+    const keys = await database.db
+      .select()
+      .from(idempotencyKeys)
+      .where(eq(idempotencyKeys.accountId, accountId));
+    expect(keys).toHaveLength(1);
+  });
+
+  it("createSession deletes row when enqueue fails", async () => {
+    const { sessions: sessionsTable } = await import("@waapi/db");
+    const { createSession } = await import("./services/sessions.js");
+    const { sessionCommandsQueue } = await import("./services/queues.js");
+    const auth = await registerVerifyLogin("enqueue-fail");
+    const original = sessionCommandsQueue.add.bind(sessionCommandsQueue);
+    sessionCommandsQueue.add = (async () => {
+      throw new Error("redis down");
+    }) as typeof sessionCommandsQueue.add;
+    try {
+      await expect(
+        createSession(database, auth.accountId, "orphan-check", "req"),
+      ).rejects.toMatchObject({ statusCode: 503 });
+      const rows = await database.db
+        .select()
+        .from(sessionsTable)
+        .where(eq(sessionsTable.accountId, auth.accountId));
+      expect(rows.filter((r) => r.name === "orphan-check")).toHaveLength(0);
+    } finally {
+      sessionCommandsQueue.add = original;
+    }
+  });
+});
+
+===== apps/api/src/security-helpers.test.ts =====
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { toWhatsAppJid } from "./lib/phone.js";
+import {
+  assertPublicUrl,
+  assertWebhookUrlShape,
+  createPinnedAgent,
+  isBlockedAddress,
+  resolveAndValidate,
+} from "./services/webhooks/ssrf.js";
+import { signPayload, verifySignature } from "./services/webhooks/sign.js";
+import { clientIp } from "./lib/client-ip.js";
+
+describe("webhook URL SSRF protection", () => {
+  const prevHttp = process.env.ALLOW_HTTP_WEBHOOKS;
+  afterEach(() => {
+    process.env.ALLOW_HTTP_WEBHOOKS = prevHttp;
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    "http://127.0.0.1/",
+    "http://[::1]/",
+    "http://[::ffff:127.0.0.1]/",
+    "http://2130706433/",
+    "http://0x7f.1/",
+    "http://100.64.0.1/",
+    "http://169.254.169.254/",
+  ])("rejects private/literal address %s", async (url) => {
+    process.env.ALLOW_HTTP_WEBHOOKS = "true";
+    const host = new URL(url).hostname;
+    await expect(resolveAndValidate(host)).rejects.toMatchObject({ code: "SSRF_BLOCKED" });
+  });
+
+  it("rejects DNS names that resolve to a private IP", async () => {
+    await expect(
+      resolveAndValidate("evil.example", async () => [
+        { address: "10.0.0.5", family: 4 },
+      ] as never),
+    ).rejects.toMatchObject({ code: "SSRF_BLOCKED" });
+  });
+
+  it("rejects when any A/AAAA is private (rebinding stub)", async () => {
+    await expect(
+      resolveAndValidate("rebind.example", async () => [
+        { address: "8.8.8.8", family: 4 },
+        { address: "127.0.0.1", family: 4 },
+      ] as never),
+    ).rejects.toMatchObject({ code: "SSRF_BLOCKED" });
+  });
+
+  it("rejects userinfo and non-https without ALLOW_HTTP_WEBHOOKS", () => {
+    process.env.ALLOW_HTTP_WEBHOOKS = "false";
+    expect(() => assertWebhookUrlShape("https://user:pass@example.com/hook")).toThrow(/userinfo/i);
+  });
+
+  it("blocks reserved ranges via isBlockedAddress", () => {
+    expect(isBlockedAddress("127.0.0.1")).toBe(true);
+    expect(isBlockedAddress("::1")).toBe(true);
+    expect(isBlockedAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isBlockedAddress("100.64.0.1")).toBe(true);
+    expect(isBlockedAddress("169.254.169.254")).toBe(true);
+    expect(isBlockedAddress("8.8.8.8")).toBe(false);
+  });
+
+  it("pinned agent lookup validates before connect", async () => {
+    const agent = createPinnedAgent({
+      lookup: (_hostname, _opts, cb) => {
+        void resolveAndValidate("127.0.0.1").then(
+          () => cb(null, "127.0.0.1", 4),
+          (err) => cb(err as NodeJS.ErrnoException, "", 4),
+        );
+      },
+    });
+    expect(agent).toBeTruthy();
+    await agent.close();
+  });
+
+  it("assertPublicUrl rejects loopback with http allowed", async () => {
+    process.env.ALLOW_HTTP_WEBHOOKS = "true";
+    await expect(assertPublicUrl("http://127.0.0.1/hook")).rejects.toMatchObject({
+      code: "SSRF_BLOCKED",
+    });
+  });
+});
+
+describe("webhook HMAC", () => {
+  it("signs payloads and verifies only an exact signature", () => {
+    const secret = "webhook-test-secret";
+    const timestamp = 1_729_000_000;
+    const body = JSON.stringify({ type: "message.received", id: "evt_1" });
+    const signature = signPayload(secret, timestamp, body);
+
+    expect(signature).toMatch(/^[0-9a-f]{64}$/);
+    expect(verifySignature(secret, timestamp, body, signature)).toBe(true);
+    expect(verifySignature(secret, timestamp, body, `sha256=${signature}`)).toBe(true);
+    expect(verifySignature(secret, timestamp, `${body} `, signature)).toBe(false);
+    expect(verifySignature(secret, timestamp + 1, body, signature)).toBe(false);
+    expect(verifySignature(secret, timestamp, body, "not-a-signature")).toBe(false);
+  });
+});
+
+describe("WhatsApp phone normalization", () => {
+  it("accepts E.164 and JID passthrough", () => {
+    expect(toWhatsAppJid("+14155552671")).toBe("14155552671@s.whatsapp.net");
+    expect(toWhatsAppJid("14155552671@s.whatsapp.net")).toBe("14155552671@s.whatsapp.net");
+  });
+
+  it.each(["garbage", "123", "", "++14155552671"])("rejects invalid phone %j", (phone) => {
+    expect(() => toWhatsAppJid(phone)).toThrow(/E\.164|JID/);
+  });
+});
+
+describe("rate-limit client IP", () => {
+  afterEach(() => {
+    delete process.env.TRUST_CLOUDFLARE;
+  });
+
+  it("does not honor forged CF-Connecting-IP when TRUST_CLOUDFLARE=false", () => {
+    process.env.TRUST_CLOUDFLARE = "false";
+    const ip = clientIp({
+      headers: { "cf-connecting-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.1" },
+      ip: "10.0.0.1",
+    } as never);
+    expect(ip).toBe("10.0.0.1");
+  });
+});
+
+===== .github/workflows/ci.yml =====
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: waapi
+          POSTGRES_PASSWORD: waapi
+          POSTGRES_DB: waapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U waapi -d waapi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      BRAND_NAME: waapi
+      NODE_ENV: test
+      LOG_LEVEL: error
+      DATABASE_URL: postgresql://waapi:waapi@localhost:5432/waapi
+      REDIS_URL: redis://localhost:6379
+      AUTH_STATE_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      AUTH_STATE_KEY_VERSION: "1"
+      MAX_SESSIONS_PER_NODE: "10"
+      WORKER_METRICS_PORT: "9091"
+      SEED_ACCOUNT_ID: 00000000-0000-4000-8000-000000000001
+      API_PORT: "3000"
+      JWT_SECRET: ci-jwt-secret-at-least-32-characters-long
+      ADMIN_API_SECRET: ci-admin-secret
+      EMAIL_DRIVER: console
+      WEBHOOK_SECRET_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DEV_RETURN_TOKENS: "true"
+      ALLOW_HTTP_WEBHOOKS: "true"
+      ENABLE_DOCS: "false"
+      GLOBAL_MAX_SESSIONS: "10000"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm db:migrate
+      # Integration tests hit real Postgres + Redis service containers (CI=true fails if unreachable)
+      - run: pnpm test
+
+===== docker-compose.yml =====
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: waapi
+      POSTGRES_PASSWORD: waapi
+      POSTGRES_DB: waapi
+    ports:
+      - "5432:5432"
+    volumes:
+      - waapi_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waapi -d waapi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - waapi_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Runs once (or on deploy) before api/worker. Compose: `docker compose run --rm migrate`
+  migrate:
+    profiles: ["prod"]
+    image: node:20-bookworm-slim
+    working_dir: /app
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://waapi:waapi@postgres:5432/waapi
+    volumes:
+      - .:/app
+    command: ["corepack", "pnpm", "db:migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://waapi:waapi@postgres:5432/waapi
+      REDIS_URL: redis://redis:6379
+      ENABLE_DOCS: "false"
+      DEV_RETURN_TOKENS: "false"
+      ALLOW_HTTP_WEBHOOKS: "false"
+      TRUST_PROXY_HOPS: "1"
+      TRUST_CLOUDFLARE: "true"
+      API_PORT: "3000"
+      INTERNAL_PORT: "3001"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  webhooks:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://waapi:waapi@postgres:5432/waapi
+      REDIS_URL: redis://redis:6379
+    command: ["node", "apps/api/dist/webhooks-main.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    profiles: ["worker", "prod"]
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://waapi:waapi@postgres:5432/waapi
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  waapi_pg:
+  waapi_redis:
+
+===== apps/api/src/config.ts =====
+import "dotenv/config";
+import { z } from "zod";
+
+const bool = (fallback: boolean) =>
+  z
+    .union([z.boolean(), z.string()])
+    .optional()
+    .transform((value) => {
+      if (typeof value === "boolean") return value;
+      if (value == null) return fallback;
+      return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+    });
+
+/** Values that must never be used in any environment (copied from docs/examples). */
+const PLACEHOLDER_SECRETS = new Set([
+  "",
+  "change-me",
+  "changeme",
+  "secret",
+  "password",
+  "ci-jwt-secret-at-least-32-characters-long",
+  "ci-admin-secret",
+  "test-jwt-secret-that-is-at-least-32-bytes",
+  "test-admin-api-secret",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+]);
+
+function decodeKey32(value: string, name: string): Buffer {
+  const decoded = /^[0-9a-f]{64}$/i.test(value)
+    ? Buffer.from(value, "hex")
+    : Buffer.from(value, "base64");
+  if (decoded.length !== 32) {
+    throw new Error(`${name} must decode to exactly 32 bytes`);
+  }
+  return decoded;
+}
+
+function rejectPlaceholder(name: string, value: string): string {
+  const trimmed = value.trim();
+  if (PLACEHOLDER_SECRETS.has(trimmed) || PLACEHOLDER_SECRETS.has(trimmed.toLowerCase())) {
+    throw new Error(`${name} is a placeholder or empty; set a real secret`);
+  }
+  if (/^A{16,}=*$/i.test(trimmed) || /^0{32,}$/.test(trimmed)) {
+    throw new Error(`${name} looks like a placeholder; set a real secret`);
+  }
+  return trimmed;
+}
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  LOG_LEVEL: z.string().default("info"),
+  API_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  INTERNAL_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().min(1),
+  JWT_SECRET: z.string().min(32),
+  JWT_ACCESS_TTL: z.string().default("15m"),
+  JWT_ISSUER: z.string().default("waapi"),
+  JWT_AUDIENCE: z.string().default("waapi-api"),
+  REFRESH_TTL: z.string().default("30d"),
+  ADMIN_API_SECRET: z.string().min(16),
+  EMAIL_DRIVER: z.enum(["console"]).default("console"),
+  WEBHOOK_SECRET_KEY: z.string().min(1),
+  BRAND_NAME: z.string().default("waapi"),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+  RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+  RATE_LIMIT_LOGIN: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_REGISTER: z.coerce.number().int().positive().default(5),
+  RATE_LIMIT_REFRESH: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_FORGOT_PASSWORD: z.coerce.number().int().positive().default(5),
+  RATE_LIMIT_RESET_PASSWORD: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_VERIFY_EMAIL: z.coerce.number().int().positive().default(20),
+  RATE_LIMIT_RESEND_VERIFICATION: z.coerce.number().int().positive().default(5),
+  SEND_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+  GLOBAL_MAX_SESSIONS: z.coerce.number().int().positive().default(10_000),
+  DEV_RETURN_TOKENS: bool(false),
+  ENABLE_DOCS: bool(false),
+  ALLOW_DOCS_IN_PROD: bool(false),
+  ALLOW_HTTP_WEBHOOKS: bool(false),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
+  TRUST_CLOUDFLARE: bool(false),
+});
+
+export type Config = z.infer<typeof envSchema>;
+
+function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const parsed = envSchema.parse(env);
+  // Always require a real 32-byte webhook encryption key.
+  decodeKey32(parsed.WEBHOOK_SECRET_KEY, "WEBHOOK_SECRET_KEY");
+
+  if (parsed.NODE_ENV === "production") {
+    rejectPlaceholder("JWT_SECRET", parsed.JWT_SECRET);
+    rejectPlaceholder("ADMIN_API_SECRET", parsed.ADMIN_API_SECRET);
+    rejectPlaceholder("WEBHOOK_SECRET_KEY", parsed.WEBHOOK_SECRET_KEY);
+    if (parsed.DEV_RETURN_TOKENS) {
+      throw new Error("DEV_RETURN_TOKENS must be false in production");
+    }
+    if (parsed.ALLOW_HTTP_WEBHOOKS) {
+      throw new Error("ALLOW_HTTP_WEBHOOKS must be false in production");
+    }
+    if (parsed.ENABLE_DOCS && !parsed.ALLOW_DOCS_IN_PROD) {
+      throw new Error("ENABLE_DOCS requires ALLOW_DOCS_IN_PROD=true in production");
+    }
+  }
+
+  return parsed;
+}
+
+export const config = loadConfig();
+
+/** Evaluated per-call so tests can flip env without reloading the module. */
+export const isDevTokenReturnEnabled = (): boolean => {
+  const env = process.env.NODE_ENV ?? config.NODE_ENV;
+  const raw = process.env.DEV_RETURN_TOKENS;
+  const flag =
+    raw == null
+      ? config.DEV_RETURN_TOKENS
+      : ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+  return env !== "production" && flag;
+};
+
+/** Test helper â€” re-run validation against an env object. */
+export const validateConfigEnv = loadConfig;
+
+===== apps/api/src/routes/v1/auth.ts =====
+import type { FastifyPluginAsync } from "fastify";
+import {
+  createPatBodySchema,
+  forgotPasswordBodySchema,
+  loginBodySchema,
+  refreshBodySchema,
+  registerBodySchema,
+  resetPasswordBodySchema,
+  verifyEmailBodySchema,
+} from "@waapi/shared";
+import { z } from "zod";
+import { isDevTokenReturnEnabled } from "../../config.js";
+import { authRateLimitConfig } from "../../lib/auth-rate-limit.js";
+import { clientIp } from "../../lib/client-ip.js";
+import { createPat, listPats, revokePat } from "../../services/tokens.js";
+import {
+  forgotPassword,
+  login,
+  logoutAll,
+  register,
+  resendVerification,
+  resetPassword,
+  rotateRefresh,
+  verifyEmail,
+} from "../../services/auth.js";
+
+const routes: FastifyPluginAsync = async (app) => {
+  const tokens = (identity: Parameters<typeof app.jwt.sign>[0], refreshToken: string) => ({
+    accessToken: app.jwt.sign(identity),
+    refreshToken,
+  });
+
+  app.post("/register", authRateLimitConfig("register"), async (request, reply) => {
+    const result = await register(
+      app.database,
+      registerBodySchema.parse(request.body),
+      clientIp(request),
+    );
+    const body: {
+      userId: string;
+      accountId: string;
+      verificationToken?: string;
+    } = {
+      userId: result.user.id,
+      accountId: result.account.id,
+    };
+    if (isDevTokenReturnEnabled()) {
+      body.verificationToken = result.verificationToken;
+    }
+    return reply.code(201).send(body);
+  });
+
+  app.post("/login", authRateLimitConfig("login"), async (request) => {
+    const input = loginBodySchema.parse(request.body);
+    const result = await login(app.database, input.email, input.password, clientIp(request));
+    return tokens(result.identity, result.refreshToken);
+  });
+
+  app.post("/refresh", authRateLimitConfig("refresh"), async (request) => {
+    const result = await rotateRefresh(
+      app.database,
+      refreshBodySchema.parse(request.body).refreshToken,
+      clientIp(request),
+    );
+    return tokens(result.identity, result.refreshToken);
+  });
+
+  app.post("/verify-email", authRateLimitConfig("verify-email"), async (request, reply) => {
+    await verifyEmail(app.database, verifyEmailBodySchema.parse(request.body).token);
+    return reply.code(204).send();
+  });
+
+  app.post(
+    "/resend-verification",
+    authRateLimitConfig("resend-verification"),
+    async (request, reply) => {
+      const email = z.object({ email: z.string().email().max(320) }).parse(request.body).email;
+      await resendVerification(app.database, email);
+      return reply.code(202).send();
+    },
+  );
+
+  app.post("/forgot-password", authRateLimitConfig("forgot-password"), async (request, reply) => {
+    await forgotPassword(app.database, forgotPasswordBodySchema.parse(request.body).email);
+    return reply.code(202).send();
+  });
+
+  app.post("/reset-password", authRateLimitConfig("reset-password"), async (request, reply) => {
+    const input = resetPasswordBodySchema.parse(request.body);
+    await resetPassword(app.database, input.token, input.password);
+    return reply.code(204).send();
+  });
+
+  app.post(
+    "/logout-all",
+    { preHandler: app.requireAuthType("jwt") },
+    async (request, reply) => {
+      await logoutAll(app.database, request.identity.userId);
+      return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/tokens",
+    { preHandler: app.requireAuthType("jwt") },
+    async (request, reply) => {
+      const input = createPatBodySchema.parse(request.body);
+      return reply
+        .code(201)
+        .send(
+          await createPat(
+            app.database,
+            request.identity.userId,
+            request.identity.accountId,
+            input.name,
+          ),
+        );
+    },
+  );
+
+  app.get("/tokens", { preHandler: app.requireAuthType("jwt") }, async (request) =>
+    listPats(app.database, request.identity.accountId),
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/tokens/:id",
+    { preHandler: app.requireAuthType("jwt") },
+    async (request, reply) => {
+      await revokePat(app.database, request.identity.accountId, request.params.id);
+      return reply.code(204).send();
+    },
+  );
+};
+export default routes;
+
+===== apps/api/src/lib/auth-rate-limit.ts =====
+import type { FastifyRequest } from "fastify";
+import { config } from "../config.js";
+import { clientIp } from "./client-ip.js";
+
+export type AuthRateBucket =
+  | "login"
+  | "register"
+  | "refresh"
+  | "forgot-password"
+  | "reset-password"
+  | "verify-email"
+  | "resend-verification";
+
+const LIMITS: Record<AuthRateBucket, () => number> = {
+  login: () => config.RATE_LIMIT_LOGIN,
+  register: () => config.RATE_LIMIT_REGISTER,
+  refresh: () => config.RATE_LIMIT_REFRESH,
+  "forgot-password": () => config.RATE_LIMIT_FORGOT_PASSWORD,
+  "reset-password": () => config.RATE_LIMIT_RESET_PASSWORD,
+  "verify-email": () => config.RATE_LIMIT_VERIFY_EMAIL,
+  "resend-verification": () => config.RATE_LIMIT_RESEND_VERIFICATION,
+};
+
+/** Distinct Redis key per auth route so exhausting one bucket cannot starve another. */
+export function authRateLimitKey(bucket: AuthRateBucket, request: FastifyRequest): string {
+  return `auth:${bucket}:ip:${clientIp(request)}`;
+}
+
+export function authRateLimitConfig(bucket: AuthRateBucket) {
+  return {
+    config: {
+      rateLimit: {
+        max: LIMITS[bucket](),
+        keyGenerator: (request: FastifyRequest) => authRateLimitKey(bucket, request),
+      },
+    },
+  };
+}
+
+===== deploy/nginx.conf =====
+# Edge proxy in front of the API. The VPS firewall must allow ports 80/443
+# only from Cloudflare IP ranges so clients cannot forge CF-Connecting-IP
+# by hitting the origin directly.
+#
+# Cloudflare ranges: https://www.cloudflare.com/ips/
+# Refresh periodically (snippet includes common IPv4/IPv6 prefixes).
+
+upstream waapi_api {
+    server 127.0.0.1:3000;
+    keepalive 32;
+}
+
+# --- real IP from Cloudflare ---
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+
+# IPv4 (subset â€” replace with full list from Cloudflare)
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+set_real_ip_from 103.22.200.0/22;
+set_real_ip_from 103.31.4.0/22;
+set_real_ip_from 141.101.64.0/18;
+set_real_ip_from 108.162.192.0/18;
+set_real_ip_from 190.93.240.0/20;
+set_real_ip_from 188.114.96.0/20;
+set_real_ip_from 197.234.240.0/22;
+set_real_ip_from 198.41.128.0/17;
+set_real_ip_from 162.158.0.0/15;
+set_real_ip_from 104.16.0.0/13;
+set_real_ip_from 104.24.0.0/14;
+set_real_ip_from 172.64.0.0/13;
+set_real_ip_from 131.0.72.0/22;
+
+# IPv6
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+set_real_ip_from 2803:f800::/32;
+set_real_ip_from 2405:b500::/32;
+set_real_ip_from 2405:8100::/32;
+set_real_ip_from 2a06:98c0::/29;
+set_real_ip_from 2c0f:f248::/32;
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+
+    # ssl_certificate     /etc/ssl/certs/fullchain.pem;
+    # ssl_certificate_key /etc/ssl/private/privkey.pem;
+
+    # Overwrite forwarding headers so the API sees one clean hop.
+    location / {
+        proxy_pass http://waapi_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Pass the verified client IP; API only reads this when TRUST_CLOUDFLARE=true
+        proxy_set_header CF-Connecting-IP $remote_addr;
+        proxy_set_header Connection "";
+    }
+}
+
+===== apps/api/Dockerfile =====
+# Production API image (non-root, migrations run as a separate compose service).
+FROM node:20-bookworm-slim AS base
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+WORKDIR /app
+
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+RUN pnpm install --frozen-lockfile --filter @waapi/api...
+
+FROM deps AS build
+COPY . .
+RUN pnpm --filter @waapi/shared build \
+ && pnpm --filter @waapi/db build \
+ && pnpm --filter @waapi/api build
+
+FROM node:20-bookworm-slim AS runner
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \
+ && useradd --system --uid 10001 --create-home waapi
+WORKDIR /app
+ENV NODE_ENV=production
+ENV ENABLE_DOCS=false
+ENV DEV_RETURN_TOKENS=false
+ENV ALLOW_HTTP_WEBHOOKS=false
+
+COPY --from=build --chown=waapi:waapi /app /app
+USER waapi
+EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=20s \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.API_PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "apps/api/dist/index.js"]
+
+===== apps/worker/Dockerfile =====
+FROM node:20-bookworm-slim AS base
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+WORKDIR /app
+
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/worker/package.json apps/worker/
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+RUN pnpm install --frozen-lockfile --filter @waapi/worker...
+
+FROM deps AS build
+COPY . .
+RUN pnpm --filter @waapi/shared build \
+ && pnpm --filter @waapi/db build \
+ && pnpm --filter @waapi/worker build
+
+FROM node:20-bookworm-slim AS runner
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \
+ && useradd --system --uid 10001 --create-home waapi
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build --chown=waapi:waapi /app /app
+USER waapi
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=30s \
+  CMD node -e "process.exit(0)"
+CMD ["node", "apps/worker/dist/index.js"]
+

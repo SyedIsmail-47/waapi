@@ -52,6 +52,8 @@ export async function createSessionTransactional(
   input: CreateSessionInput,
 ) {
   return db.transaction(async (tx) => {
+    // Serialize creates per account so concurrent Promise.all cannot overshoot maxSessions.
+    await tx.execute(sql`select id from accounts where id = ${input.accountId} for update`);
     const accountRows = await tx
       .select()
       .from(accounts)
