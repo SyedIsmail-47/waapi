@@ -143,6 +143,40 @@ export function startSendTextWorker(args: {
               updatedAt: new Date(),
             })
             .where(eq(outboundMessages.id, payload.messageId));
+          try {
+            await insertMessageLog(db, {
+              accountId: payload.accountId,
+              sessionId: payload.sessionId,
+              direction: "outbound",
+              remoteJid: payload.to,
+              messageId: payload.messageId,
+              fromMe: true,
+              messageType: "conversation",
+              error: errMsg,
+            });
+            await enqueueWebhookOutbox(db, {
+              accountId: payload.accountId,
+              sessionId: payload.sessionId,
+              eventType: "message.failed",
+              payload: {
+                id: crypto.randomUUID(),
+                type: "message.failed",
+                accountId: payload.accountId,
+                sessionId: payload.sessionId,
+                createdAt: new Date().toISOString(),
+                data: {
+                  outboundId: payload.messageId,
+                  remoteJid: payload.to,
+                  error: errMsg,
+                },
+              },
+            });
+          } catch (sideErr) {
+            log.error(
+              { err: sideErr, sessionId: payload.sessionId, outboundId: payload.messageId },
+              "post-fail side effects failed",
+            );
+          }
           await markRedacted(job, payload as unknown as Record<string, unknown>);
           return { failed: true, error: errMsg };
         }

@@ -161,21 +161,9 @@ export async function sendText(
       },
     );
   } catch (err) {
-    await database.db
-      .update(outboundMessages)
-      .set({
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-        updatedAt: new Date(),
-      })
-      .where(eq(outboundMessages.id, messageId));
-    await database.db
-      .update(idempotencyKeys)
-      .set({
-        responseStatus: 503,
-        responseBody: { id: messageId, status: "failed", error: "ENQUEUE_FAILED" },
-      })
-      .where(eq(idempotencyKeys.id, claimId));
+    // Drop claim + outbound so the same key can retry cleanly.
+    await database.db.delete(outboundMessages).where(eq(outboundMessages.id, messageId));
+    await database.db.delete(idempotencyKeys).where(eq(idempotencyKeys.id, claimId));
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
       statusCode: 503,
       code: "INTERNAL_ERROR",

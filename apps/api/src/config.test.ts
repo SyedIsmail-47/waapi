@@ -7,9 +7,32 @@ const base = {
   JWT_SECRET: "production-grade-jwt-secret-value-32b!",
   ADMIN_API_SECRET: "production-admin-secret!!",
   WEBHOOK_SECRET_KEY: Buffer.alloc(32, 9).toString("base64"),
+  GLOBAL_MAX_SESSIONS: "50",
+  EMAIL_DRIVER: "resend",
+  RESEND_API_KEY: "re_test_key",
 };
 
 describe("production config guards", () => {
+  it("requires GLOBAL_MAX_SESSIONS in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        GLOBAL_MAX_SESSIONS: undefined,
+      }),
+    ).toThrow(/GLOBAL_MAX_SESSIONS/);
+  });
+
+  it("refuses EMAIL_DRIVER=console in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        EMAIL_DRIVER: "console",
+      }),
+    ).toThrow(/EMAIL_DRIVER/);
+  });
+
   it("refuses DEV_RETURN_TOKENS in production", () => {
     expect(() =>
       validateConfigEnv({
@@ -68,5 +91,10 @@ describe("production config guards", () => {
         WEBHOOK_SECRET_KEY: "too-short",
       }),
     ).toThrow(/32 bytes/);
+  });
+
+  it("DEFAULT_ACCOUNT_MAX_SESSIONS defaults to 1", () => {
+    const cfg = validateConfigEnv({ ...base, NODE_ENV: "test" });
+    expect(cfg.DEFAULT_ACCOUNT_MAX_SESSIONS).toBe(1);
   });
 });

@@ -126,6 +126,8 @@ export const messageLogs = pgTable(
     messageId: text("message_id").notNull(),
     fromMe: boolean("from_me").notNull(),
     messageType: text("message_type").notNull(),
+    /** Stable failure code e.g. delivery_unknown — never message body text. */
+    error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -358,7 +360,8 @@ export const webhookDeliveries = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     eventType: text("event_type", { enum: WEBHOOK_EVENT_TYPES }).notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    /** Encrypted envelope `{ __enc: "vN...." }` or null after retention purge. */
+    payload: jsonb("payload").$type<Record<string, unknown> | null>(),
     payloadHash: text("payload_hash").notNull(),
     status: text("status", {
       enum: ["pending", "success", "retrying", "dead", "skipped"],

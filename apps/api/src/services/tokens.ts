@@ -1,16 +1,18 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { personalAccessTokens, sessionApiKeys, sessions, type Db } from "@waapi/db";
+import { config } from "../config.js";
 import { randomToken, sha256 } from "../lib/crypto.js";
 
 export async function createPat(database: Db, userId: string, accountId: string, name: string) {
-  const token = randomToken("waapi_pat_");
+  const prefix = config.brand.patPrefix;
+  const token = randomToken(prefix);
   const [row] = await database.db
     .insert(personalAccessTokens)
     .values({
       userId,
       accountId,
       name,
-      tokenPrefix: token.slice(0, 18),
+      tokenPrefix: token.slice(0, Math.min(18, prefix.length + 8)),
       tokenHash: sha256(token),
       scopes: ["account"],
     })
@@ -71,14 +73,15 @@ export async function createSessionKey(
   if (!session) {
     throw Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
   }
-  const token = randomToken("waapi_sk_");
+  const prefix = config.brand.sessionKeyPrefix;
+  const token = randomToken(prefix);
   const [row] = await database.db
     .insert(sessionApiKeys)
     .values({
       accountId,
       sessionId,
       name,
-      tokenPrefix: token.slice(0, 17),
+      tokenPrefix: token.slice(0, Math.min(17, prefix.length + 8)),
       tokenHash: sha256(token),
     })
     .returning();

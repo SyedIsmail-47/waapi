@@ -1,8 +1,9 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { sessions, webhookDeliveries, webhookEndpoints, type Db } from "@waapi/db";
 import { decryptSecret, encryptSecret } from "../../lib/crypto.js";
 import { defaultJobOptions, webhookDeliveryQueue } from "../queues.js";
+import { insertEncryptedDelivery } from "./deliveries.js";
 import { assertPublicUrl } from "./ssrf.js";
 
 export async function upsertWebhook(
@@ -99,29 +100,54 @@ export async function testWebhook(database: Db, accountId: string, sessionId: st
     createdAt: new Date().toISOString(),
     data: { status: "connected", test: true },
   };
-  const [delivery] = await database.db
-    .insert(webhookDeliveries)
-    .values({
-      endpointId: endpoint.id,
-      accountId,
-      sessionId,
-      eventType: "session.status",
-      payload,
-      payloadHash: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
-    })
-    .returning();
-  return delivery!.id;
+  return insertEncryptedDelivery(database, {
+    endpointId: endpoint.id,
+    accountId,
+    sessionId,
+    eventType: "session.status",
+    payload,
+  });
 }
 
-export async function enqueueDelivery(id: string): Promise<void> {
+export async function enqueueDelivery(id: string, jobId?: string): Promise<void> {
+  const { config } = await import("../../config.js");
   await webhookDeliveryQueue.add(
     "deliver",
     { deliveryId: id },
     {
       ...defaultJobOptions,
-      jobId: id,
-      attempts: 8,
+      jobId: jobId ?? id,
+      attempts: config.WEBHOOK_MAX_ATTEMPTS,
       backoff: { type: "custom" },
     },
   );
+}
+
+/** Re-queue a failed/dead delivery for another attempt cycle. */
+export async function replayDelivery(
+  database: Db,
+  accountId: string,
+  sessionId: string,
+  deliveryId: string,
+): Promise<{ deliveryId: string; queued: true }> {
+  const [delivery] = await database.db
+    .select()
+    .from(webhookDeliveries)
+    .where(
+      and(
+        eq(webhookDeliveries.id, deliveryId),
+        eq(webhookDeliveries.accountId, accountId),
+        eq(webhookDeliveries.sessionId, sessionId),
+      ),
+    )
+    .limit(1);
+  if (!delivery) {
+    throw Object.assign(new Error("Delivery not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  await database.db
+    .update(webhookDeliveries)
+    .set({ status: "pending", lastError: null, updatedAt: new Date() })
+    .where(eq(webhookDeliveries.id, deliveryId));
+  await enqueueDelivery(deliveryId, `replay-${deliveryId}-${Date.now()}`);
+  return { deliveryId, queued: true };
 }

@@ -180,6 +180,48 @@ export async function assertPublicUrl(value: string): Promise<URL> {
   return url;
 }
 
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | Array<{ address: string; family: number }>,
+  family?: number,
+) => void;
+
+function wantsAll(opts: unknown): boolean {
+  return typeof opts === "object" && opts != null && "all" in opts && Boolean((opts as { all?: boolean }).all);
+}
+
+/** Exported for tests — undici may call with `{ all: true }` expecting an address array. */
+export function createPinnedLookup(options?: { lookup?: LookupFn }) {
+  return (hostname: string, opts: unknown, cb: LookupCallback) => {
+    const run = async () => {
+      let address: string;
+      let family: number;
+      if (options?.lookup) {
+        await new Promise<void>((resolve, reject) => {
+          options.lookup!(hostname, opts, (err, addr, fam) => {
+            if (err) reject(err);
+            else {
+              address = addr;
+              family = fam;
+              resolve();
+            }
+          });
+        });
+      } else {
+        const validated = await resolveAndValidate(hostname);
+        address = validated.address;
+        family = validated.family;
+      }
+      if (wantsAll(opts)) {
+        cb(null, [{ address: address!, family: family! }]);
+      } else {
+        cb(null, address!, family!);
+      }
+    };
+    void run().catch((err: NodeJS.ErrnoException) => cb(err, "", 4));
+  };
+}
+
 export function createPinnedAgent(options?: {
   lookup?: LookupFn;
   connectTimeout?: number;
@@ -187,41 +229,32 @@ export function createPinnedAgent(options?: {
   return new Agent({
     connect: {
       timeout: options?.connectTimeout ?? 10_000,
-      lookup: (hostname, opts, cb) => {
-        const run = async () => {
-          if (options?.lookup) {
-            await new Promise<void>((resolve, reject) => {
-              options.lookup!(hostname, opts, (err, address, family) => {
-                if (err) reject(err);
-                else {
-                  cb(null, address, family);
-                  resolve();
-                }
-              });
-            });
-            return;
-          }
-          const validated = await resolveAndValidate(hostname);
-          cb(null, validated.address, validated.family);
-        };
-        void run().catch((err: NodeJS.ErrnoException) => cb(err, "", 4));
-      },
+      lookup: createPinnedLookup({ lookup: options?.lookup }),
     },
   });
 }
 
 export const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 
+/**
+ * Drain response body up to maxBytes. Oversize: stop reading / destroy stream.
+ * Callers judge success by HTTP status code (do not throw on size).
+ */
 export async function dumpBodyLimited(
   body: Dispatcher.ResponseData["body"],
   maxBytes = MAX_WEBHOOK_RESPONSE_BYTES,
-): Promise<void> {
+): Promise<{ truncated: boolean; bytes: number }> {
   let total = 0;
-  for await (const chunk of body) {
-    total += chunk.length;
-    if (total > maxBytes) {
-      body.destroy();
-      throw new Error("Webhook response exceeded 64KB");
+  try {
+    for await (const chunk of body) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        body.destroy();
+        return { truncated: true, bytes: total };
+      }
     }
+  } catch {
+    /* destroyed stream / aborted — ignore */
   }
+  return { truncated: false, bytes: total };
 }

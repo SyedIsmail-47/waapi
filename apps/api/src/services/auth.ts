@@ -91,7 +91,10 @@ export async function register(
     result = await db(database).transaction(async (tx) => {
       const [account] = await tx
         .insert(accounts)
-        .values({ name: input.name ?? email })
+        .values({
+          name: input.name ?? email,
+          maxSessions: config.DEFAULT_ACCOUNT_MAX_SESSIONS,
+        })
         .returning();
       const [user] = await tx
         .insert(users)
@@ -338,6 +341,18 @@ export async function resendVerification(database: Db, emailInput: string) {
   const email = emailInput.trim().toLowerCase();
   const [user] = await db(database).select().from(users).where(eq(users.email, email)).limit(1);
   if (!user || user.emailVerifiedAt) return;
+
+  const { redis } = await import("./queues.js");
+  const cooldownKey = `email:resend-verify:${user.id}`;
+  const acquired = await redis.set(
+    cooldownKey,
+    "1",
+    "EX",
+    config.RESEND_VERIFICATION_COOLDOWN_SECONDS,
+    "NX",
+  );
+  if (acquired !== "OK") return;
+
   await db(database)
     .update(emailVerificationTokens)
     .set({ usedAt: new Date() })

@@ -25,6 +25,7 @@ const ACCOUNT_SCOPED_ROUTE_PATTERNS = [
   { method: "GET", url: "/api/v1/sessions/:id/webhook" },
   { method: "DELETE", url: "/api/v1/sessions/:id/webhook" },
   { method: "POST", url: "/api/v1/sessions/:id/webhook/test" },
+  { method: "POST", url: "/api/v1/sessions/:id/webhook/deliveries/:deliveryId/replay" },
   { method: "POST", url: "/api/v1/send-message" },
 ];
 
@@ -311,7 +312,12 @@ describe("Phase 2 API integration", () => {
   });
 
   it("enforces session-key scoping", async () => {
+    const { accounts } = await import("@waapi/db");
     const auth = await registerVerifyLogin("sk-scope");
+    await database.db
+      .update(accounts)
+      .set({ maxSessions: 2 })
+      .where(eq(accounts.id, auth.accountId));
     const s1 = await app.inject({
       method: "POST",
       url: "/api/v1/sessions",
@@ -412,7 +418,7 @@ describe("Phase 2 API integration", () => {
     expect(responses.filter((response) => response.statusCode === 409)).toHaveLength(4);
   });
 
-  it("20 concurrent sends with one Idempotency-Key produce one outbound row", async () => {
+  it("50 concurrent sends with one Idempotency-Key produce one outbound row", async () => {
     const { accounts, sessions, outboundMessages, idempotencyKeys } = await import("@waapi/db");
     const { randomUUID } = await import("node:crypto");
     const { sendText } = await import("./services/send.js");
@@ -426,10 +432,8 @@ describe("Phase 2 API integration", () => {
     const body = { sessionId: session!.id, to: "+14155552671", text: "hello" };
     const key = `idem-${randomUUID()}`;
 
-    // Mock queue enqueue by temporarily stubbing — use real queue if Redis up;
-    // count DB rows regardless of enqueue success.
     const results = await Promise.allSettled(
-      Array.from({ length: 20 }, () => sendText(database, accountId, body, key, randomUUID())),
+      Array.from({ length: 50 }, () => sendText(database, accountId, body, key, randomUUID())),
     );
     const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
       id: string;

@@ -17,6 +17,7 @@ export const upsertWebhookBodySchema = z.object({
   enabled: z.boolean().optional().default(true),
 });
 
+/** Public session shape — nodeId / authKeyVersion never included. */
 export const sessionDtoSchema = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -24,7 +25,6 @@ export const sessionDtoSchema = z.object({
   status: sessionStatusSchema,
   phoneNumber: z.string().nullable(),
   lastError: z.string().nullable(),
-  nodeId: z.string().nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
@@ -34,7 +34,6 @@ export const sessionStatusResponseSchema = z.object({
   status: sessionStatusSchema,
   phoneNumber: z.string().nullable(),
   lastError: z.string().nullable(),
-  nodeId: z.string().nullable(),
   qr: z
     .object({
       value: z.string(),
@@ -47,5 +46,5 @@ export const sessionStatusResponseSchema = z.object({
 
 export const sendMessageResponseSchema = z.object({
   id: z.string().uuid(),
-  status: z.literal("queued"),
+  status: z.enum(["queued", "failed", "in_progress"]),
 });

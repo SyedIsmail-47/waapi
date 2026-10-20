@@ -5,7 +5,7 @@ import {
   command,
   createSession,
   deleteSession,
-  getSession,
+  getSessionPublic,
   listSessions,
   status,
 } from "../../services/sessions.js";
@@ -37,16 +37,20 @@ const routes: FastifyPluginAsync = async (app) => {
   );
 
   app.get<{ Params: { id: string } }>("/:id", accountAuth, async (request) =>
-    getSession(app.database, request.identity.accountId, paramsSchema.parse(request.params).id),
+    getSessionPublic(
+      app.database,
+      request.identity.accountId,
+      paramsSchema.parse(request.params).id,
+    ),
   );
 
   app.delete<{ Params: { id: string } }>("/:id", accountAuth, async (request, reply) => {
-    await deleteSession(
+    const result = await deleteSession(
       app.database,
       request.identity.accountId,
       paramsSchema.parse(request.params).id,
     );
-    return reply.code(204).send();
+    return reply.code(202).send(result);
   });
 
   for (const action of ["connect", "disconnect", "logout"] as const) {

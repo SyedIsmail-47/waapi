@@ -43,6 +43,13 @@
       "when": 1792512000000,
       "tag": "0005_phase2_round3",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792600000000,
+      "tag": "0006_phase2_round4",
+      "breakpoints": true
     }
   ]
 }

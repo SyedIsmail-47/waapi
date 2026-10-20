@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
 import sensible from "@fastify/sensible";
 import { createDb } from "@waapi/db";
 import {
@@ -19,11 +20,26 @@ import sessionRoutes from "./routes/v1/sessions.js";
 import webhookRoutes from "./routes/v1/webhooks.js";
 import { closeQueues } from "./services/queues.js";
 import { purgeAuthArtifacts } from "./services/auth.js";
+import { purgeRetentionTables } from "./services/retention.js";
+import { finalizeDeletedSessions } from "./services/sessions.js";
+import { sweepStaleOutbound } from "./services/send.js";
 import "./types.js";
 
 export type BuiltApp = FastifyInstance & {
   registeredRoutes: Array<{ method: string; url: string }>;
 };
+
+function corsOriginConfig(): boolean | string[] | ((origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => void) {
+  // Default: no browser CORS (API clients / same-origin gateway).
+  // Set CORS_ORIGINS to a comma-separated allowlist when a dashboard origin needs access.
+  const raw = config.CORS_ORIGINS?.trim();
+  if (!raw) return false;
+  const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (list.includes("*")) {
+    return (origin, cb) => cb(null, Boolean(origin));
+  }
+  return list;
+}
 
 export async function buildApp(): Promise<BuiltApp> {
   const app = Fastify({
@@ -55,7 +71,14 @@ export async function buildApp(): Promise<BuiltApp> {
   app.decorate("database", database);
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
-  await app.register(cors, { origin: false });
+
+  await app.register(helmet, {
+    global: true,
+    contentSecurityPolicy: false,
+  });
+  await app.register(cors, {
+    origin: corsOriginConfig() as boolean | string[],
+  });
   await app.register(sensible);
 
   if (config.ENABLE_DOCS) {
@@ -85,11 +108,22 @@ export async function buildApp(): Promise<BuiltApp> {
 
   const purgeTimer = setInterval(() => {
     void purgeAuthArtifacts(database).catch(() => undefined);
+    void purgeRetentionTables(database).catch(() => undefined);
+    void finalizeDeletedSessions(database).catch(() => undefined);
+    void sweepStaleOutbound(database).catch(() => undefined);
   }, 60 * 60_000);
   purgeTimer.unref?.();
 
+  // Faster sweep for stuck outbound / soft-deleted sessions in process.
+  const sweepTimer = setInterval(() => {
+    void sweepStaleOutbound(database).catch(() => undefined);
+    void finalizeDeletedSessions(database).catch(() => undefined);
+  }, 30_000);
+  sweepTimer.unref?.();
+
   app.addHook("onClose", async () => {
     clearInterval(purgeTimer);
+    clearInterval(sweepTimer);
     await closeQueues();
     await database.client.end();
   });

@@ -75,6 +75,14 @@ describe("webhook URL SSRF protection", () => {
     await agent.close();
   });
 
+  it("dumpBodyLimited stops without throwing past 64KB", async () => {
+    const { Readable } = await import("node:stream");
+    const { dumpBodyLimited } = await import("./services/webhooks/ssrf.js");
+    const body = Readable.from([Buffer.alloc(70 * 1024)]) as never;
+    Object.assign(body, { destroy: () => undefined });
+    await expect(dumpBodyLimited(body)).resolves.toMatchObject({ truncated: true });
+  });
+
   it("assertPublicUrl rejects loopback with http allowed", async () => {
     process.env.ALLOW_HTTP_WEBHOOKS = "true";
     await expect(assertPublicUrl("http://127.0.0.1/hook")).rejects.toMatchObject({

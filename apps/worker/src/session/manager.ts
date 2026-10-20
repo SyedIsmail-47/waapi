@@ -9,6 +9,7 @@ import {
   createSessionTransactional,
   getSessionForAccount,
   listSessionsToLoad,
+  hardDeleteIfSoftDeleted,
   markLoggedOutAndWipeAuth,
   sweepAuthForLoggedOutSessions,
   updateSessionStatus,
@@ -143,11 +144,13 @@ export class SessionManager {
     const client = this.clients.get(sessionId);
     if (client) {
       await this.handleLoggedOut(client);
+      await hardDeleteIfSoftDeleted(this.db, accountId, sessionId);
       return;
     }
     this.loggedOutSessions.add(sessionId);
     this.clearReconnect(sessionId);
     await markLoggedOutAndWipeAuth(this.db, accountId, sessionId);
+    await hardDeleteIfSoftDeleted(this.db, accountId, sessionId);
   }
 
   private isCurrentClient(client: WAClient): boolean {
@@ -207,6 +210,7 @@ export class SessionManager {
                 messageId: meta.messageId,
                 fromMe: meta.fromMe,
                 messageType: meta.messageType,
+                ...(meta.text != null ? { text: meta.text } : {}),
               },
             },
           });
@@ -456,6 +460,7 @@ export class SessionManager {
     });
 
     await this.disposeClient(client, { flush: false });
+    await hardDeleteIfSoftDeleted(this.db, client.accountId, client.sessionId);
   }
 
   async loadOnBoot(): Promise<void> {

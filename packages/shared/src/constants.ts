@@ -39,6 +39,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "qrcode.updated",
   "messages.upsert",
   "message.sent",
+  "message.failed",
 ] as const;
 
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];

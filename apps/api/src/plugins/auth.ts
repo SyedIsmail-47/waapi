@@ -1,6 +1,6 @@
 import fp from "fastify-plugin";
 import jwt from "@fastify/jwt";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { personalAccessTokens, sessionApiKeys } from "@waapi/db";
 import { config } from "../config.js";
 import { sha256 } from "../lib/crypto.js";
@@ -20,9 +20,12 @@ const httpError = (message: string, statusCode: number, code: string) =>
 
 async function touchLastUsed(
   update: () => Promise<unknown>,
-  lastUsedAt: Date | null,
+  lastUsedAt: Date | string | null,
 ): Promise<void> {
-  if (lastUsedAt && Date.now() - lastUsedAt.getTime() < 60_000) return;
+  if (lastUsedAt) {
+    const ts = lastUsedAt instanceof Date ? lastUsedAt.getTime() : new Date(lastUsedAt).getTime();
+    if (!Number.isNaN(ts) && Date.now() - ts < 60_000) return;
+  }
   await update();
 }
 

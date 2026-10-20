@@ -1,3 +1,9 @@
+import { config as loadDotenv } from "dotenv";
+import { resolve } from "node:path";
+
+// Load project .env first so Redis password / DB URL win over bare defaults.
+loadDotenv({ path: resolve(process.cwd(), ".env"), override: true });
+
 process.env.NODE_ENV ??= "test";
 process.env.BRAND_NAME ??= "waapi-test";
 process.env.JWT_SECRET ??= "test-jwt-secret-that-is-at-least-32-bytes";
@@ -5,7 +11,11 @@ process.env.ADMIN_API_SECRET ??= "test-admin-api-secret";
 process.env.WEBHOOK_SECRET_KEY ??= Buffer.alloc(32, 7).toString("base64");
 process.env.AUTH_STATE_ENCRYPTION_KEY ??= Buffer.alloc(32, 9).toString("base64");
 process.env.DATABASE_URL ??= "postgresql://waapi:waapi@localhost:5432/waapi";
-process.env.REDIS_URL ??= "redis://localhost:6379";
+if (!process.env.REDIS_URL) {
+  process.env.REDIS_URL = process.env.REDIS_PASSWORD
+    ? `redis://:${process.env.REDIS_PASSWORD}@localhost:6379`
+    : "redis://localhost:6379";
+}
 process.env.DEV_RETURN_TOKENS ??= "true";
 process.env.ALLOW_HTTP_WEBHOOKS ??= "true";
 process.env.ENABLE_DOCS ??= "false";
@@ -19,3 +29,7 @@ process.env.RATE_LIMIT_RESET_PASSWORD = "10000";
 process.env.RATE_LIMIT_VERIFY_EMAIL = "10000";
 process.env.RATE_LIMIT_RESEND_VERIFICATION = "10000";
 process.env.SEND_RATE_LIMIT_MAX = "10000";
+process.env.RATE_LIMIT_ACCOUNT_MAX = "10000";
+process.env.GLOBAL_MAX_SESSIONS ??= "1000";
+process.env.DEFAULT_ACCOUNT_MAX_SESSIONS ??= "1";
+process.env.EMAIL_DRIVER ??= "console";

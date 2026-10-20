@@ -5,6 +5,7 @@ import {
   enqueueDelivery,
   getWebhook,
   removeWebhook,
+  replayDelivery,
   testWebhook,
   upsertWebhook,
 } from "../../services/webhooks/index.js";
@@ -47,6 +48,23 @@ const routes: FastifyPluginAsync = async (app) => {
       );
       await enqueueDelivery(deliveryId);
       return reply.code(202).send({ deliveryId, queued: true });
+    },
+  );
+
+  app.post<{ Params: { id: string; deliveryId: string } }>(
+    "/:id/webhook/deliveries/:deliveryId/replay",
+    accountAuth,
+    async (request, reply) => {
+      const parsed = z
+        .object({ id: z.string().uuid(), deliveryId: z.string().uuid() })
+        .parse(request.params);
+      const result = await replayDelivery(
+        app.database,
+        request.identity.accountId,
+        parsed.id,
+        parsed.deliveryId,
+      );
+      return reply.code(202).send(result);
     },
   );
 };

@@ -112,9 +112,33 @@ curl -i "$BASE/sessions/$SESSION_ID" \
   -H "authorization: Bearer $ACCESS_B"
 ```
 
+## `delivery_unknown` (outbound send)
+
+When the WhatsApp client returns an ambiguous send error (timeout / unknown ack),
+the worker marks the outbound row `failed` with `error: "delivery_unknown"` and
+does **not** auto-retry (a retry could double-send).
+
+- **GET `/api/v1/messages`** — items may include `"error": "delivery_unknown"`.
+- **Webhook `message.failed`** — `data.error` is `"delivery_unknown"` (no message body).
+- **Deduping** — treat `(sessionId, outboundId)` or `(sessionId, messageId)` as the
+  idempotency key. If you later see a `message.sent` / inbound echo for the same
+  conversation, reconcile client-side; do not re-call send with a new Idempotency-Key
+  unless you intend a second message.
+
+## CORS plan
+
+- Default: CORS is **disabled** (`origin: false`). The API is for server-side / mobile
+  clients and same-origin reverse proxies, not open browser cross-origin access.
+- When a first-party dashboard needs browser access, set `CORS_ORIGINS` to an explicit
+  comma-separated allowlist (e.g. `https://app.example.com`). Do not use `*` in production.
+- Helmet is enabled globally (CSP off so OpenAPI/docs remain usable when enabled).
+- All source files and HTTP bodies are UTF-8 without BOM.
+
 ## RAM / caps
 
 Run `pnpm ram-probe` and fill the table above. Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.
+`GLOBAL_MAX_SESSIONS` is required in production (no code default). New accounts get
+`DEFAULT_ACCOUNT_MAX_SESSIONS` (default 1).
 
 ## Worker node lock (`WORKER_ID`)
 

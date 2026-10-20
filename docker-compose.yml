@@ -1,6 +1,6 @@
 # Production-oriented compose. Postgres/Redis are NOT published to the host.
-# For local host-run API/tests: also merge docker-compose.local.yml
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# For local host-run API/tests: also merge docker-compose.dev.yml
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 #
 # Required .env (no hardcoded credentials in this file):
 #   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
@@ -62,8 +62,9 @@ services:
       target: migrate
     env_file: [.env]
     environment:
-      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
-    command: ["node", "packages/db/dist/migrate.js"]
+      # In-compose DNS — not host localhost from .env
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    command: ["node", "node_modules/@waapi/db/dist/migrate.js"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,8 +81,8 @@ services:
     env_file: [.env]
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       ENABLE_DOCS: "false"
       DEV_RETURN_TOKENS: "false"
       ALLOW_HTTP_WEBHOOKS: "false"
@@ -123,10 +124,10 @@ services:
     env_file: [.env]
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       EMAIL_DRIVER: ${EMAIL_DRIVER:-resend}
-    command: ["node", "apps/api/dist/webhooks-main.js"]
+    command: ["node", "dist/webhooks-main.js"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -147,8 +148,8 @@ services:
     env_file: [.env]
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       WORKER_METRICS_PORT: "9091"
     depends_on:
       postgres:

@@ -1,5 +1,5 @@
 # Local-only overrides: publish Postgres/Redis for host-run API/tests.
-# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 services:
   postgres:
     ports:

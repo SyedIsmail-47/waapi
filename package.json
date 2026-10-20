@@ -23,9 +23,11 @@
     "seed": "tsx scripts/seed.ts",
     "cli": "tsx scripts/cli.ts",
     "ram-probe": "tsx scripts/ram-probe.ts",
-    "docker:up": "docker compose -f docker-compose.yml -f docker-compose.local.yml up -d",
-    "docker:down": "docker compose -f docker-compose.yml -f docker-compose.local.yml down",
-    "docker:up:prod": "docker compose --profile prod up -d --build"
+    "docker:up": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d",
+    "docker:down": "docker compose -f docker-compose.yml -f docker-compose.dev.yml down",
+    "docker:up:prod": "docker compose -f docker-compose.yml --profile prod up -d --build",
+    "check:compose-prod": "powershell -NoProfile -File scripts/check-compose-prod.ps1",
+    "smoke:prod": "tsx scripts/smoke-prod.ts"
   },
   "dependencies": {
     "@waapi/shared": "workspace:*",

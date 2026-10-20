@@ -88,6 +88,14 @@ const envSchema = z.object({
   DEFAULT_ACCOUNT_MAX_SESSIONS: z.coerce.number().int().positive().default(1),
   WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().positive().default(15),
   WEBHOOK_DEAD_AFTER_CONSECUTIVE: z.coerce.number().int().positive().default(15),
+  /** AES-GCM key version prefix for webhook_deliveries.payload at rest. */
+  WEBHOOK_PAYLOAD_KEY_VERSION: z.string().default("v1"),
+  /** Optional JSON map of older payload keys: {"v0":"<base64|hex>"} */
+  WEBHOOK_PAYLOAD_KEY_RING: z.string().optional(),
+  /** Purge encrypted payload body 72h after success (metadata row kept). */
+  WEBHOOK_PAYLOAD_PURGE_SUCCESS_HOURS: z.coerce.number().int().positive().default(72),
+  /** Purge encrypted payload body 7d after failed/dead (metadata row kept). */
+  WEBHOOK_PAYLOAD_PURGE_FAILED_DAYS: z.coerce.number().int().positive().default(7),
   DEV_RETURN_TOKENS: bool(false),
   ENABLE_DOCS: bool(false),
   ALLOW_DOCS_IN_PROD: bool(false),
