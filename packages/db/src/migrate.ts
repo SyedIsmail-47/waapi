@@ -1,8 +1,13 @@
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { config as loadDotenv } from "dotenv";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+
+const rootEnv = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../../.env");
+if (existsSync(rootEnv)) loadDotenv({ path: rootEnv });
 
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
