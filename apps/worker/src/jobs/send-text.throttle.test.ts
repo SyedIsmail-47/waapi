@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { Queue, Worker, DelayedError } from "bullmq";
+import { Queue, DelayedError } from "bullmq";
 import { Redis } from "ioredis";
 import { QUEUE_SEND_TEXT } from "@waapi/shared";
 import { claimOutboundForSend, sessionThrottleDelay, startSendTextWorker } from "./send-text.js";
@@ -113,7 +113,10 @@ describe("send-text throttle (token-bucket + DelayedError)", () => {
 
     const delay = await sessionThrottleDelay(redis, sessionId, 2000);
     expect(delay).toBeGreaterThan(0);
-    await fakeJob.moveToDelayed(Date.now() + delay, fakeJob.token);
+    await (fakeJob.moveToDelayed as (ts: number, token?: string) => Promise<void>)(
+      Date.now() + delay,
+      fakeJob.token,
+    );
     expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), "job-token-abc");
     // Throwing DelayedError is the contract (attemptsMade stays 0).
     expect(() => {

@@ -2,9 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { webhookDeliveries, type Db } from "@waapi/db";
 import { wrapDeliveryPayload } from "../../lib/payload-crypto.js";
 
+/** Drizzle db or transaction handle (insert-capable). */
+type InsertCapable = Pick<Db["db"], "insert">;
+
 /** Insert a delivery with AES-GCM encrypted payload (AAD = delivery id). */
 export async function insertEncryptedDelivery(
-  database: Db,
+  db: InsertCapable,
   args: {
     endpointId: string;
     accountId: string;
@@ -15,7 +18,7 @@ export async function insertEncryptedDelivery(
 ): Promise<string> {
   const id = randomUUID();
   const { stored, hash } = wrapDeliveryPayload(args.payload, id);
-  await database.db.insert(webhookDeliveries).values({
+  await db.insert(webhookDeliveries).values({
     id,
     endpointId: args.endpointId,
     accountId: args.accountId,

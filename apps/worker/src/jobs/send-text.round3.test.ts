@@ -39,7 +39,7 @@ describe("send-text round 3", () => {
       remoteJid: "14155552671@s.whatsapp.net",
     }));
     const updates: Array<{ status: string }> = [];
-    let postSendThrows = true;
+    const postSendThrows = true;
 
     // Simulate processor core: claim → send once → mark sent → post-send fails
     const claim = await claimOutboundForSend(
@@ -51,7 +51,10 @@ describe("send-text round 3", () => {
     );
     expect(claim.status).toBe("claimed");
 
-    const result = await sendText("+1", "hi");
+    const result = await (sendText as (to: string, text: string) => Promise<{ messageId: string }>)(
+      "+1",
+      "hi",
+    );
     updates.push({ status: "sent" });
     expect(result.messageId).toBe("wamid-1");
 

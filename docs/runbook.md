@@ -4,13 +4,23 @@
 
 ```bash
 cp .env.example .env
-# set AUTH_STATE_ENCRYPTION_KEY to 32 random bytes, base64
+# set AUTH_STATE_ENCRYPTION_KEY and PAYLOAD_ENCRYPTION_KEY to 32 random bytes, base64
 pnpm install
 pnpm docker:up
 pnpm db:migrate
 pnpm seed
 pnpm dev:worker
 ```
+
+### Email / production env
+
+`EMAIL_DRIVER=console` is **refused** when `NODE_ENV=production` (API and workers will not boot).
+For production, use a **separate env file that is never committed** (for example `.env.production`, loaded by your host/orchestrator — not checked into git). Set:
+
+- `EMAIL_DRIVER=smtp` and `SMTP_URL=...`, or
+- `EMAIL_DRIVER=resend` and `RESEND_API_KEY=...`
+
+Also set `EMAIL_FROM` to a verified sender. Local/dev may keep `EMAIL_DRIVER=console`.
 
 Metrics: `http://localhost:9091/metrics`
 

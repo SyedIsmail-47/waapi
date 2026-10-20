@@ -1,33 +1,35 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
+import {
+  buildPayloadKeyResolver,
+  decryptPayloadJson as decryptShared,
+  encryptPayloadJson as encryptShared,
+  isEncryptedPayload,
+  type EncryptedPayloadEnvelope,
+  type PayloadKeyResolver,
+} from "@waapi/shared";
 import { config } from "../config.js";
 
-const ENC_MARKER = "__enc" as const;
+export type { EncryptedPayloadEnvelope };
+export { isEncryptedPayload };
 
-export type EncryptedPayloadEnvelope = { [ENC_MARKER]: string };
-
-function decodeKey32(value: string, name: string): Buffer {
-  const decoded = /^[0-9a-f]{64}$/i.test(value)
-    ? Buffer.from(value, "hex")
-    : Buffer.from(value, "base64");
-  if (decoded.length !== 32) throw new Error(`${name} must decode to 32 bytes`);
-  return decoded;
+/** Delivery payloads: WEBHOOK_SECRET_KEY (legacy + current). */
+function deliveryKeyResolver(): PayloadKeyResolver {
+  return buildPayloadKeyResolver({
+    currentVersion: config.WEBHOOK_PAYLOAD_KEY_VERSION ?? "v1",
+    currentKey: config.WEBHOOK_SECRET_KEY,
+    currentKeyName: "WEBHOOK_SECRET_KEY",
+    ringJson: config.WEBHOOK_PAYLOAD_KEY_RING,
+  });
 }
 
-/**
- * Key ring: current version from WEBHOOK_PAYLOAD_KEY_VERSION (default v1)
- * uses WEBHOOK_SECRET_KEY. Optional WEBHOOK_PAYLOAD_KEY_RING JSON map of
- * older versions for decrypt: {"v0":"<base64|hex>"}.
- */
-function keyForVersion(version: string): Buffer {
-  if (version === (config.WEBHOOK_PAYLOAD_KEY_VERSION ?? "v1")) {
-    return decodeKey32(config.WEBHOOK_SECRET_KEY, "WEBHOOK_SECRET_KEY");
-  }
-  const ringRaw = config.WEBHOOK_PAYLOAD_KEY_RING;
-  if (!ringRaw) throw new Error(`Unknown payload key version ${version}`);
-  const ring = JSON.parse(ringRaw) as Record<string, string>;
-  const material = ring[version];
-  if (!material) throw new Error(`Unknown payload key version ${version}`);
-  return decodeKey32(material, `WEBHOOK_PAYLOAD_KEY_RING.${version}`);
+/** Outbox payloads: PAYLOAD_ENCRYPTION_KEY. */
+export function outboxKeyResolver(): PayloadKeyResolver {
+  return buildPayloadKeyResolver({
+    currentVersion: config.PAYLOAD_ENCRYPTION_KEY_VERSION ?? "v1",
+    currentKey: config.PAYLOAD_ENCRYPTION_KEY,
+    currentKeyName: "PAYLOAD_ENCRYPTION_KEY",
+    ringJson: config.PAYLOAD_ENCRYPTION_KEY_RING,
+  });
 }
 
 export function encryptPayloadJson(
@@ -35,55 +37,26 @@ export function encryptPayloadJson(
   aad: string,
   version = config.WEBHOOK_PAYLOAD_KEY_VERSION ?? "v1",
 ): EncryptedPayloadEnvelope {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", keyForVersion(version), iv);
-  cipher.setAAD(Buffer.from(aad, "utf8"));
-  const ciphertext = Buffer.concat([cipher.update(plaintextJson, "utf8"), cipher.final()]);
-  const packed = [iv, cipher.getAuthTag(), ciphertext]
-    .map((part) => part.toString("base64url"))
-    .join(".");
-  return { [ENC_MARKER]: `${version}.${packed}` };
+  return encryptShared(
+    plaintextJson,
+    aad,
+    deliveryKeyResolver()(version),
+    version,
+  );
 }
 
 export function decryptPayloadJson(
   envelope: Record<string, unknown> | null | undefined,
   aad: string,
 ): string {
-  if (!envelope || typeof envelope !== "object") {
-    throw new Error("Missing encrypted payload");
-  }
-  // Legacy plaintext jsonb (pre-round4) — still deliverable once.
-  if (!(ENC_MARKER in envelope)) {
-    return JSON.stringify(envelope);
-  }
-  const value = (envelope as EncryptedPayloadEnvelope)[ENC_MARKER];
-  if (typeof value !== "string") throw new Error("Invalid encrypted payload");
-  const dot = value.indexOf(".");
-  if (dot < 1) throw new Error("Invalid encrypted payload version");
-  const version = value.slice(0, dot);
-  const rest = value.slice(dot + 1);
-  const [ivText, tagText, ciphertextText] = rest.split(".");
-  if (!ivText || !tagText || !ciphertextText) throw new Error("Invalid encrypted payload");
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    keyForVersion(version),
-    Buffer.from(ivText, "base64url"),
-  );
-  decipher.setAAD(Buffer.from(aad, "utf8"));
-  decipher.setAuthTag(Buffer.from(tagText, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertextText, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
+  return decryptShared(envelope, aad, deliveryKeyResolver());
 }
 
-export function isEncryptedPayload(value: unknown): value is EncryptedPayloadEnvelope {
-  return (
-    typeof value === "object" &&
-    value != null &&
-    ENC_MARKER in value &&
-    typeof (value as EncryptedPayloadEnvelope)[ENC_MARKER] === "string"
-  );
+export function decryptOutboxPayloadJson(
+  envelope: Record<string, unknown> | null | undefined,
+  aad: string,
+): string {
+  return decryptShared(envelope, aad, outboxKeyResolver());
 }
 
 export function wrapDeliveryPayload(

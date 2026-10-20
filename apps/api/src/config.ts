@@ -70,6 +70,11 @@ const envSchema = z.object({
   SMTP_URL: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
   WEBHOOK_SECRET_KEY: z.string().min(1),
+  /** AES-GCM key for webhook_outbox payloads at rest (32 bytes base64|hex). */
+  PAYLOAD_ENCRYPTION_KEY: z.string().min(1),
+  PAYLOAD_ENCRYPTION_KEY_VERSION: z.string().default("v1"),
+  /** Optional JSON map of older outbox keys: {"v0":"<base64|hex>"} */
+  PAYLOAD_ENCRYPTION_KEY_RING: z.string().optional(),
   BRAND_NAME: z.string().default("waapi"),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
@@ -113,6 +118,7 @@ export type Config = z.infer<typeof envSchema> & {
 function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = envSchema.parse(env);
   decodeKey32(parsed.WEBHOOK_SECRET_KEY, "WEBHOOK_SECRET_KEY");
+  decodeKey32(parsed.PAYLOAD_ENCRYPTION_KEY, "PAYLOAD_ENCRYPTION_KEY");
 
   let globalMax = parsed.GLOBAL_MAX_SESSIONS;
   if (parsed.NODE_ENV === "production") {
@@ -122,6 +128,7 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rejectPlaceholder("JWT_SECRET", parsed.JWT_SECRET);
     rejectPlaceholder("ADMIN_API_SECRET", parsed.ADMIN_API_SECRET);
     rejectPlaceholder("WEBHOOK_SECRET_KEY", parsed.WEBHOOK_SECRET_KEY);
+    rejectPlaceholder("PAYLOAD_ENCRYPTION_KEY", parsed.PAYLOAD_ENCRYPTION_KEY);
     if (parsed.DEV_RETURN_TOKENS) {
       throw new Error("DEV_RETURN_TOKENS must be false in production");
     }

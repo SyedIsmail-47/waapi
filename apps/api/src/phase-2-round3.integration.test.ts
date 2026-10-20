@@ -324,8 +324,7 @@ describe("Phase 2 round 3", () => {
       headers: { authorization: `Bearer ${auth.accessToken}` },
       payload: { name: "sk" },
     });
-    const sk = keyRes.json<{ token: string; id: string }>().token;
-    const keyId = keyRes.json<{ id: string }>().id;
+    const sk = keyRes.json<{ token: string }>().token;
     const patRes = await app.inject({
       method: "POST",
       url: "/api/v1/auth/tokens",

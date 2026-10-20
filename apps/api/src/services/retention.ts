@@ -63,7 +63,8 @@ export async function purgeRetentionTables(database: Db): Promise<Record<string,
   `);
   counts.webhook_deliveries = Number((deliveries[0] as { n: number } | undefined)?.n ?? 0);
 
-  const outbox = await database.db.execute(sql`
+  // Processed rows are deleted by the poller; drop any leftover processed rows.
+  const outboxProcessed = await database.db.execute(sql`
     with d as (
       delete from webhook_outbox
       where processed_at is not null
@@ -72,7 +73,21 @@ export async function purgeRetentionTables(database: Db): Promise<Record<string,
     )
     select count(*)::int as n from d
   `);
-  counts.webhook_outbox = Number((outbox[0] as { n: number } | undefined)?.n ?? 0);
+  counts.webhook_outbox_processed = Number(
+    (outboxProcessed[0] as { n: number } | undefined)?.n ?? 0,
+  );
+
+  // Unprocessed outbox (encrypted) older than 24h — drop to bound retention.
+  const outboxStale = await database.db.execute(sql`
+    with d as (
+      delete from webhook_outbox
+      where processed_at is null
+        and created_at < now() - interval '24 hours'
+      returning 1
+    )
+    select count(*)::int as n from d
+  `);
+  counts.webhook_outbox_stale = Number((outboxStale[0] as { n: number } | undefined)?.n ?? 0);
 
   const outbound = await database.db.execute(sql`
     with d as (

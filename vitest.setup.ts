@@ -9,6 +9,8 @@ process.env.BRAND_NAME ??= "waapi-test";
 process.env.JWT_SECRET ??= "test-jwt-secret-that-is-at-least-32-bytes";
 process.env.ADMIN_API_SECRET ??= "test-admin-api-secret";
 process.env.WEBHOOK_SECRET_KEY ??= Buffer.alloc(32, 7).toString("base64");
+process.env.PAYLOAD_ENCRYPTION_KEY ??= Buffer.alloc(32, 11).toString("base64");
+process.env.PAYLOAD_ENCRYPTION_KEY_VERSION ??= "v1";
 process.env.AUTH_STATE_ENCRYPTION_KEY ??= Buffer.alloc(32, 9).toString("base64");
 process.env.DATABASE_URL ??= "postgresql://waapi:waapi@localhost:5432/waapi";
 if (!process.env.REDIS_URL) {

@@ -86,7 +86,7 @@ describe("webhook payload encryption + purge", () => {
       },
     };
 
-    const deliveryId = await insertEncryptedDelivery(database, {
+    const deliveryId = await insertEncryptedDelivery(database.db, {
       endpointId,
       accountId,
       sessionId: session!.id,

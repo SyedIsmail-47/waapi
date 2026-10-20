@@ -100,7 +100,7 @@ export async function testWebhook(database: Db, accountId: string, sessionId: st
     createdAt: new Date().toISOString(),
     data: { status: "connected", test: true },
   };
-  return insertEncryptedDelivery(database, {
+  return insertEncryptedDelivery(database.db, {
     endpointId: endpoint.id,
     accountId,
     sessionId,

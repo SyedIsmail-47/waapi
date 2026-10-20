@@ -7,6 +7,7 @@ const base = {
   JWT_SECRET: "production-grade-jwt-secret-value-32b!",
   ADMIN_API_SECRET: "production-admin-secret!!",
   WEBHOOK_SECRET_KEY: Buffer.alloc(32, 9).toString("base64"),
+  PAYLOAD_ENCRYPTION_KEY: Buffer.alloc(32, 11).toString("base64"),
   GLOBAL_MAX_SESSIONS: "50",
   EMAIL_DRIVER: "resend",
   RESEND_API_KEY: "re_test_key",
