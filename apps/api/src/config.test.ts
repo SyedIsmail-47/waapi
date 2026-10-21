@@ -11,6 +11,7 @@ const base = {
   GLOBAL_MAX_SESSIONS: "50",
   EMAIL_DRIVER: "resend",
   RESEND_API_KEY: "re_test_key",
+  TURNSTILE_SECRET_KEY: "turnstile-test-secret",
 };
 
 describe("production config guards", () => {
@@ -72,6 +73,29 @@ describe("production config guards", () => {
       ALLOW_DOCS_IN_PROD: "true",
     });
     expect(cfg.ENABLE_DOCS).toBe(true);
+  });
+
+  it("requires TURNSTILE_SECRET_KEY in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        TURNSTILE_SECRET_KEY: undefined,
+      }),
+    ).toThrow(/TURNSTILE_SECRET_KEY/);
+  });
+
+  it("allows TURNSTILE_DISABLED under SMOKE_MODE in production", () => {
+    const cfg = validateConfigEnv({
+      ...base,
+      NODE_ENV: "production",
+      SMOKE_MODE: "true",
+      TURNSTILE_DISABLED: "true",
+      TURNSTILE_SECRET_KEY: undefined,
+      COOKIE_SECURE: "false",
+    });
+    expect(cfg.TURNSTILE_DISABLED).toBe(true);
+    expect(cfg.COOKIE_SECURE).toBe(false);
   });
 
   it("rejects placeholder JWT_SECRET in production", () => {
