@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 import { sessions, webhookDeliveries, webhookEndpoints, type Db } from "@waapi/db";
 import { decryptSecret, encryptSecret } from "../../lib/crypto.js";
 import { defaultJobOptions, webhookDeliveryQueue } from "../queues.js";
@@ -121,6 +121,56 @@ export async function enqueueDelivery(id: string, jobId?: string): Promise<void>
       backoff: { type: "custom" },
     },
   );
+}
+
+export async function listDeliveries(
+  database: Db,
+  accountId: string,
+  sessionId: string,
+  opts: { cursor?: string; limit?: number } = {},
+) {
+  const [session] = await database.db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!session) {
+    throw Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+  const conditions = [
+    eq(webhookDeliveries.accountId, accountId),
+    eq(webhookDeliveries.sessionId, sessionId),
+  ];
+  if (opts.cursor) {
+    const decoded = Buffer.from(opts.cursor, "base64url").toString("utf8");
+    const cursorDate = new Date(decoded);
+    if (Number.isNaN(cursorDate.getTime())) {
+      throw Object.assign(new Error("Invalid cursor"), { statusCode: 400, code: "VALIDATION_ERROR" });
+    }
+    conditions.push(lt(webhookDeliveries.createdAt, cursorDate));
+  }
+  const rows = await database.db
+    .select({
+      id: webhookDeliveries.id,
+      eventType: webhookDeliveries.eventType,
+      status: webhookDeliveries.status,
+      attempts: webhookDeliveries.attempts,
+      lastError: webhookDeliveries.lastError,
+      responseCode: webhookDeliveries.responseCode,
+      createdAt: webhookDeliveries.createdAt,
+      updatedAt: webhookDeliveries.updatedAt,
+    })
+    .from(webhookDeliveries)
+    .where(and(...conditions))
+    .orderBy(desc(webhookDeliveries.createdAt))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit);
+  const next =
+    rows.length > limit
+      ? Buffer.from(page[page.length - 1]!.createdAt.toISOString(), "utf8").toString("base64url")
+      : null;
+  return { items: page, nextCursor: next };
 }
 
 /** Re-queue a failed/dead delivery for another attempt cycle. */

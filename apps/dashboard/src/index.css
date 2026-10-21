@@ -13,6 +13,17 @@
   --warn: #9a5b12;
 }
 
+.dark {
+  --ink: #e8efe9;
+  --muted: #9aaba0;
+  --paper: #0f1612;
+  --panel: #161e19;
+  --line: #2a3830;
+  --accent: #3dba75;
+  --accent-soft: #1a2e23;
+  --warn: #e0a04a;
+}
+
 html,
 body,
 #root {
@@ -23,12 +34,13 @@ body {
   margin: 0;
   color: var(--ink);
   background:
-    radial-gradient(1200px 600px at 10% -10%, #dff0e6 0%, transparent 55%),
-    radial-gradient(900px 500px at 100% 0%, #e8efe4 0%, transparent 50%),
+    radial-gradient(1200px 600px at 10% -10%, color-mix(in srgb, var(--accent-soft) 80%, transparent) 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, color-mix(in srgb, var(--line) 40%, transparent) 0%, transparent 50%),
     var(--paper);
   font-family: "IBM Plex Sans", sans-serif;
 }
 
+.font-display,
 .display {
   font-family: Fraunces, Georgia, serif;
 }

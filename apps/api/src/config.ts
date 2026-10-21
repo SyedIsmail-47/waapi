@@ -113,6 +113,22 @@ const envSchema = z.object({
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
   TRUST_CLOUDFLARE: bool(false),
   CORS_ORIGINS: z.string().optional(),
+  /**
+   * Refresh cookie Secure flag. Defaults false outside production so local
+   * http (Vite / smoke) can set cookies; production forces Secure.
+   */
+  COOKIE_SECURE: bool(false),
+  /** Cloudflare Turnstile secret; required when TURNSTILE_DISABLED=false. */
+  TURNSTILE_SECRET_KEY: z.string().optional(),
+  /** Skip Turnstile verification (tests/smoke). Forbidden in production unless SMOKE_MODE. */
+  TURNSTILE_DISABLED: bool(false),
+  /**
+   * Allows COOKIE_SECURE=false and TURNSTILE_DISABLED=true under NODE_ENV=production
+   * for the local smoke stack only. Never set on a real customer host.
+   */
+  SMOKE_MODE: bool(false),
+  /** Seconds a just-rotated refresh may be reused without family revoke. */
+  REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().positive().default(10),
 });
 
 export type Config = z.infer<typeof envSchema> & {
@@ -134,7 +150,7 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rejectPlaceholder("ADMIN_API_SECRET", parsed.ADMIN_API_SECRET);
     rejectPlaceholder("WEBHOOK_SECRET_KEY", parsed.WEBHOOK_SECRET_KEY);
     rejectPlaceholder("PAYLOAD_ENCRYPTION_KEY", parsed.PAYLOAD_ENCRYPTION_KEY);
-    if (parsed.DEV_RETURN_TOKENS) {
+    if (parsed.DEV_RETURN_TOKENS && !parsed.SMOKE_MODE) {
       throw new Error("DEV_RETURN_TOKENS must be false in production");
     }
     if (parsed.ALLOW_HTTP_WEBHOOKS) {
@@ -152,11 +168,25 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (parsed.EMAIL_DRIVER === "smtp" && !parsed.SMTP_URL) {
       throw new Error("SMTP_URL is required when EMAIL_DRIVER=smtp");
     }
+    if (!parsed.SMOKE_MODE) {
+      if (parsed.TURNSTILE_DISABLED) {
+        throw new Error("TURNSTILE_DISABLED must be false in production");
+      }
+      if (!parsed.TURNSTILE_SECRET_KEY?.trim()) {
+        throw new Error("TURNSTILE_SECRET_KEY is required in production");
+      }
+    }
   }
   globalMax ??= 100;
 
+  const cookieSecure =
+    parsed.NODE_ENV === "production" && !parsed.SMOKE_MODE
+      ? true
+      : parsed.COOKIE_SECURE;
+
   return {
     ...parsed,
+    COOKIE_SECURE: cookieSecure,
     GLOBAL_MAX_SESSIONS: globalMax,
     brand: getBrandTokens(parsed.BRAND_NAME),
   };
@@ -171,6 +201,8 @@ export const isDevTokenReturnEnabled = (): boolean => {
     raw == null
       ? config.DEV_RETURN_TOKENS
       : ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+  // Smoke stack may run NODE_ENV=production with SMOKE_MODE for e2e.
+  if (config.SMOKE_MODE && flag) return true;
   return env !== "production" && flag;
 };
 

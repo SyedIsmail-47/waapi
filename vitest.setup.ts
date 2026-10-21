@@ -36,3 +36,6 @@ process.env.RATE_LIMIT_ACCOUNT_MAX = "10000";
 process.env.GLOBAL_MAX_SESSIONS ??= "1000";
 process.env.DEFAULT_ACCOUNT_MAX_SESSIONS ??= "1";
 process.env.EMAIL_DRIVER ??= "console";
+process.env.TURNSTILE_DISABLED ??= "true";
+process.env.COOKIE_SECURE ??= "false";
+process.env.REFRESH_REUSE_GRACE_SECONDS ??= "10";

@@ -81,8 +81,9 @@ describe("Phase 2 round 3", () => {
     };
   }
 
-  it("refresh reuse: every family token revoked_at set + security_audit_log row", async () => {
+  it("refresh reuse within grace returns successor; after grace family revoked + audit", async () => {
     const { refreshTokens, securityAuditLog } = await import("@waapi/db");
+    const { redis } = await import("./services/queues.js");
     const auth = await registerVerifyLogin("reuse-db");
     const rotated = await app.inject({
       method: "POST",
@@ -91,6 +92,17 @@ describe("Phase 2 round 3", () => {
     });
     expect(rotated.statusCode).toBe(200);
     const next = rotated.json<{ refreshToken: string }>().refreshToken;
+
+    const graceReuse = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: auth.refreshToken },
+    });
+    expect(graceReuse.statusCode).toBe(200);
+    expect(graceReuse.json<{ refreshToken: string }>().refreshToken).toBe(next);
+
+    const oldHash = createHash("sha256").update(auth.refreshToken).digest("hex");
+    await redis.del(`refresh:grace:${oldHash}`);
 
     const reuse = await app.inject({
       method: "POST",
@@ -358,11 +370,17 @@ describe("Phase 2 round 3", () => {
       if (url.startsWith("/api/v1/auth/register") || url.includes("/login") ||
           url.includes("/refresh") || url.includes("/verify-email") ||
           url.includes("/resend-verification") || url.includes("/forgot-password") ||
-          url.includes("/reset-password")) {
+          url.includes("/reset-password") ||
+          (url === "/api/v1/auth/logout" && method === "POST")) {
         // Public auth routes — invalid body/token → 400/401 (never 5xx)
+        // POST /auth/logout clears cookies even without a session (204).
         return [400, 401, 202, 204, 201, 200, 403, 429];
       }
       if (mode === "none") return 401;
+      if (url === "/api/v1/auth/me") {
+        if (mode === "jwt") return 200;
+        return 403;
+      }
       if (url.startsWith("/api/v1/auth/tokens") || url.includes("/logout-all")) {
         if (mode === "jwt") return [200, 201, 204, 404];
         return 403;
@@ -388,7 +406,11 @@ describe("Phase 2 round 3", () => {
       if (url.includes("/keys")) {
         // session_key is forbidden (403); 401 if the key was already revoked earlier in the matrix
         if (mode === "session_key") return [401, 403];
-        return [201, 204, 404];
+        return [200, 201, 204, 404];
+      }
+      if (url.includes("/sessions/") && url.includes("/logout")) {
+        if (mode === "session_key") return 403;
+        return [202, 404, 409];
       }
       if (url.includes("/status")) {
         return [200, 404];

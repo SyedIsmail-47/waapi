@@ -1,0 +1,9 @@
+/** Browser-safe surface for the dashboard (no node:crypto). */
+export * from "./brand.js";
+export * from "./constants.js";
+export * from "./errors.js";
+export * from "./schemas/session.js";
+export * from "./schemas/auth.js";
+export * from "./schemas/api.js";
+export * from "./schemas/events.js";
+export * from "./types.js";

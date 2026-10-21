@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
+import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import sensible from "@fastify/sensible";
@@ -80,6 +81,7 @@ export async function buildApp(): Promise<BuiltApp> {
     origin: corsOriginConfig() as boolean | string[],
   });
   await app.register(sensible);
+  await app.register(cookie);
 
   if (config.ENABLE_DOCS) {
     const [{ default: swagger }, { jsonSchemaTransform }, swaggerUi] = await Promise.all([

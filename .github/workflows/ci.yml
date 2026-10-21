@@ -72,6 +72,8 @@ jobs:
       ENABLE_DOCS: "false"
       GLOBAL_MAX_SESSIONS: "100"
       DEFAULT_ACCOUNT_MAX_SESSIONS: "1"
+      TURNSTILE_DISABLED: "true"
+      COOKIE_SECURE: "false"
 
     steps:
       - uses: actions/checkout@v4
@@ -85,5 +87,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: pnpm --filter @waapi/dashboard test
       - run: pnpm db:migrate
       - run: pnpm test
