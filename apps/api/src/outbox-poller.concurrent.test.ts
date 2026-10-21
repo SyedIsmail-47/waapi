@@ -81,8 +81,18 @@ describe("outbox poller concurrency", () => {
       return n;
     }
 
-    const [a, b] = await Promise.all([drain(), drain()]);
-    expect(a + b).toBe(total);
+    // Parallel test files share Postgres and may also call pollOutboxOnce;
+    // assert on this session's final state, not drain return counts.
+    await Promise.all([drain(), drain()]);
+    // Keep draining until this session's outbox is empty (other pollers may help).
+    for (let i = 0; i < 20; i++) {
+      const left = await database.db
+        .select({ id: webhookOutbox.id })
+        .from(webhookOutbox)
+        .where(eq(webhookOutbox.sessionId, session!.id));
+      if (left.length === 0) break;
+      await pollOutboxOnce(database);
+    }
 
     const remaining = await database.db
       .select({ id: webhookOutbox.id })
