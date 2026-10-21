@@ -3,7 +3,10 @@ dist
 build
 coverage
 .env
-.env.local
+.env.*
+!.env.example
+*.key
+review-*.txt
 *.log
 .DS_Store
 .turbo

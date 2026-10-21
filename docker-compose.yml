@@ -1,54 +1,176 @@
+# Production-oriented compose. Postgres/Redis are NOT published to the host.
+# For local host-run API/tests: also merge docker-compose.dev.yml
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Required .env (no hardcoded credentials in this file):
+#   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+#   REDIS_PASSWORD
+#   DATABASE_URL, REDIS_URL (include redis password)
+#   JWT_SECRET, ADMIN_API_SECRET, WEBHOOK_SECRET_KEY, AUTH_STATE_ENCRYPTION_KEY
+#   GLOBAL_MAX_SESSIONS, DEFAULT_ACCOUNT_MAX_SESSIONS
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: waapi
-      POSTGRES_PASSWORD: waapi
-      POSTGRES_DB: waapi
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
     volumes:
       - waapi_pg:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U waapi -d waapi"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_PASSWORD:?set REDIS_PASSWORD}",
+        "--appendonly",
+        "yes",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
     volumes:
       - waapi_redis:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
+    logging: *default-logging
 
-  # Local/dev still uses `pnpm dev:worker`. This service documents graceful stop
-  # (stop_grace_period 30s) for compose-based deploys: `docker compose --profile worker up`.
-  worker:
-    profiles: ["worker"]
-    image: node:20-bookworm-slim
-    working_dir: /app
-    stop_grace_period: 30s
-    env_file:
-      - .env
+  migrate:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: migrate
+    env_file: [.env]
     environment:
-      DATABASE_URL: postgresql://waapi:waapi@postgres:5432/waapi
-      REDIS_URL: redis://redis:6379
-    volumes:
-      - .:/app
-    command: ["pnpm", "--filter", "@waapi/worker", "dev"]
+      # In-compose DNS — not host localhost from .env
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    command: ["node", "node_modules/@waapi/db/dist/migrate.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  api:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      ENABLE_DOCS: "false"
+      DEV_RETURN_TOKENS: "false"
+      ALLOW_HTTP_WEBHOOKS: "false"
+      TRUST_PROXY_HOPS: "1"
+      TRUST_CLOUDFLARE: "true"
+      API_PORT: "3000"
+      INTERNAL_PORT: "3001"
+      EMAIL_DRIVER: ${EMAIL_DRIVER:-resend}
+    ports:
+      - "127.0.0.1:3000:3000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  webhooks:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      EMAIL_DRIVER: ${EMAIL_DRIVER:-resend}
+    command: ["node", "dist/webhooks-main.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  worker:
+    profiles: ["worker", "prod"]
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    mem_limit: 1024m
+    stop_grace_period: 30s
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      WORKER_METRICS_PORT: "9091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:'+(process.env.WORKER_METRICS_PORT||9091)+'/metrics').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
 
 volumes:
   waapi_pg:

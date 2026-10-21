@@ -10,6 +10,8 @@ export type MessageLogInsert = {
   messageId: string;
   fromMe: boolean;
   messageType: string;
+  /** Stable failure code e.g. delivery_unknown — never message body. */
+  error?: string | null;
 };
 
 export async function insertMessageLog(db: Db["db"], row: MessageLogInsert) {

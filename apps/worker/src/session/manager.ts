@@ -2,14 +2,19 @@ import type { SessionStatus } from "@waapi/shared";
 import type { WorkerConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { insertMessageLog } from "../db/message-logs.js";
+import { eq } from "drizzle-orm";
+import { sessions } from "@waapi/db";
+import { QR_TTL_SECONDS } from "@waapi/shared";
 import {
   createSessionTransactional,
   getSessionForAccount,
   listSessionsToLoad,
+  hardDeleteIfSoftDeleted,
   markLoggedOutAndWipeAuth,
   sweepAuthForLoggedOutSessions,
   updateSessionStatus,
 } from "../db/sessions.js";
+import { enqueueWebhookOutbox } from "../db/webhook-outbox.js";
 import type { Logger } from "../logger.js";
 import { publishQr, publishStatus } from "../redis/pubsub.js";
 import { SessionLeaseManager } from "../redis/lease.js";
@@ -78,6 +83,14 @@ export class SessionManager {
     if (this.loggedOutSessions.has(sessionId)) throw new Error("SESSION_LOGGED_OUT");
     if (this.clients.has(sessionId)) return;
     if (this.clients.size >= this.cfg.maxSessionsPerNode) {
+      await this.db
+        .update(sessions)
+        .set({
+          status: "error",
+          lastError: "NODE_SESSION_CAP",
+          updatedAt: new Date(),
+        })
+        .where(eq(sessions.id, sessionId));
       throw new Error("NODE_SESSION_CAP");
     }
 
@@ -92,6 +105,10 @@ export class SessionManager {
     if (!leased) throw new Error("SESSION_LEASE_HELD");
 
     try {
+      await this.db
+        .update(sessions)
+        .set({ nodeId: this.cfg.workerId, updatedAt: new Date() })
+        .where(eq(sessions.id, sessionId));
       const client = await this.createClient({ sessionId, accountId });
       this.bindClient(client);
       this.clients.set(sessionId, client);
@@ -106,6 +123,34 @@ export class SessionManager {
       }
       throw err;
     }
+  }
+
+  async closeSession(accountId: string, sessionId: string): Promise<void> {
+    const session = await getSessionForAccount(this.db, accountId, sessionId);
+    if (!session) throw new Error("SESSION_NOT_FOUND_FOR_ACCOUNT");
+    this.clearReconnect(sessionId);
+    const client = this.clients.get(sessionId);
+    if (client) {
+      await this.disposeClient(client, { flush: true });
+    }
+    await updateSessionStatus(this.db, accountId, sessionId, "disconnected", {
+      lastError: null,
+    });
+  }
+
+  async logoutSession(accountId: string, sessionId: string): Promise<void> {
+    const session = await getSessionForAccount(this.db, accountId, sessionId);
+    if (!session) throw new Error("SESSION_NOT_FOUND_FOR_ACCOUNT");
+    const client = this.clients.get(sessionId);
+    if (client) {
+      await this.handleLoggedOut(client);
+      await hardDeleteIfSoftDeleted(this.db, accountId, sessionId);
+      return;
+    }
+    this.loggedOutSessions.add(sessionId);
+    this.clearReconnect(sessionId);
+    await markLoggedOutAndWipeAuth(this.db, accountId, sessionId);
+    await hardDeleteIfSoftDeleted(this.db, accountId, sessionId);
   }
 
   private isCurrentClient(client: WAClient): boolean {
@@ -123,11 +168,7 @@ export class SessionManager {
   private bindClient(client: WAClient): void {
     client.on("qr", (qr) => {
       if (!this.isCurrentClient(client)) return;
-      void publishQr(this.redis, {
-        sessionId: client.sessionId,
-        qr,
-        at: new Date().toISOString(),
-      }).catch((err) => {
+      void this.persistQr(client, qr).catch((err) => {
         this.log.error({ err, sessionId: client.sessionId }, "publishQr failed");
       });
     });
@@ -143,15 +184,38 @@ export class SessionManager {
 
     client.on("messageMeta", (meta) => {
       if (!this.isCurrentClient(client)) return;
-      void insertMessageLog(this.db, {
-        accountId: client.accountId,
-        sessionId: client.sessionId,
-        direction: meta.fromMe ? "outbound" : "inbound",
-        remoteJid: meta.remoteJid,
-        messageId: meta.messageId,
-        fromMe: meta.fromMe,
-        messageType: meta.messageType,
-      }).catch((err) => {
+      void (async () => {
+        await insertMessageLog(this.db, {
+          accountId: client.accountId,
+          sessionId: client.sessionId,
+          direction: meta.fromMe ? "outbound" : "inbound",
+          remoteJid: meta.remoteJid,
+          messageId: meta.messageId,
+          fromMe: meta.fromMe,
+          messageType: meta.messageType,
+        });
+        if (!meta.fromMe) {
+          await enqueueWebhookOutbox(this.db, {
+            accountId: client.accountId,
+            sessionId: client.sessionId,
+            eventType: "messages.upsert",
+            payload: {
+              id: crypto.randomUUID(),
+              type: "messages.upsert",
+              accountId: client.accountId,
+              sessionId: client.sessionId,
+              createdAt: new Date().toISOString(),
+              data: {
+                remoteJid: meta.remoteJid,
+                messageId: meta.messageId,
+                fromMe: meta.fromMe,
+                messageType: meta.messageType,
+                ...(meta.text != null ? { text: meta.text } : {}),
+              },
+            },
+          });
+        }
+      })().catch((err) => {
         this.log.error({ err, sessionId: client.sessionId }, "message log insert failed");
       });
     });
@@ -199,6 +263,37 @@ export class SessionManager {
     return true;
   }
 
+  private async persistQr(client: WAClient, qr: string): Promise<void> {
+    const at = new Date();
+    const expiresAt = new Date(at.getTime() + QR_TTL_SECONDS * 1000);
+    await this.db
+      .update(sessions)
+      .set({
+        status: "need_scan",
+        updatedAt: at,
+      })
+      .where(eq(sessions.id, client.sessionId));
+    await publishQr(this.redis, {
+      sessionId: client.sessionId,
+      qr,
+      at: at.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+    });
+    await enqueueWebhookOutbox(this.db, {
+      accountId: client.accountId,
+      sessionId: client.sessionId,
+      eventType: "qrcode.updated",
+      payload: {
+        id: crypto.randomUUID(),
+        type: "qrcode.updated",
+        accountId: client.accountId,
+        sessionId: client.sessionId,
+        createdAt: at.toISOString(),
+        data: { updatedAt: at.toISOString(), expiresAt: expiresAt.toISOString() },
+      },
+    });
+  }
+
   private async handleStatus(
     client: WAClient,
     status: SessionStatus,
@@ -214,14 +309,31 @@ export class SessionManager {
     });
     if (!updated) return;
 
+    const at = new Date().toISOString();
     await publishStatus(this.redis, {
       sessionId: client.sessionId,
       accountId: client.accountId,
       status,
-      at: new Date().toISOString(),
+      at,
       lastError: detail?.error ?? null,
     }).catch((err) => {
       this.log.error({ err, sessionId: client.sessionId }, "publishStatus failed");
+    });
+
+    await enqueueWebhookOutbox(this.db, {
+      accountId: client.accountId,
+      sessionId: client.sessionId,
+      eventType: "session.status",
+      payload: {
+        id: crypto.randomUUID(),
+        type: "session.status",
+        accountId: client.accountId,
+        sessionId: client.sessionId,
+        createdAt: at,
+        data: { status, lastError: detail?.error ?? null, phoneNumber: detail?.phoneNumber ?? null },
+      },
+    }).catch((err) => {
+      this.log.error({ err, sessionId: client.sessionId }, "webhook outbox failed");
     });
 
     if (status === "connected") {
@@ -348,6 +460,7 @@ export class SessionManager {
     });
 
     await this.disposeClient(client, { flush: false });
+    await hardDeleteIfSoftDeleted(this.db, client.accountId, client.sessionId);
   }
 
   async loadOnBoot(): Promise<void> {

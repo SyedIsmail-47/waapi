@@ -1,18 +1,24 @@
-import { getBrandName } from "@waapi/shared";
+import { buildApp, buildInternalApp } from "./app.js";
+import { config } from "./config.js";
+import { startEmailWorker } from "./services/email.js";
 
-/**
- * Phase 1 stub. Full Fastify /api/v1 lands in Phase 2.
- * API must never hold Baileys sockets.
- */
 async function main(): Promise<void> {
-  const brand = getBrandName();
-  console.log(
-    JSON.stringify({
-      service: "api",
-      brand,
-      status: "stub",
-      message: "API not implemented in Phase 1",
-    }),
+  const app = await buildApp();
+  const emailWorker = startEmailWorker();
+  const internal = await buildInternalApp(app.database);
+
+  app.addHook("onClose", async () => {
+    await emailWorker.close();
+    await internal.close();
+  });
+
+  await Promise.all([
+    app.listen({ host: "0.0.0.0", port: config.API_PORT }),
+    internal.listen({ host: "127.0.0.1", port: config.INTERNAL_PORT }),
+  ]);
+  app.log.info(
+    { apiPort: config.API_PORT, internalPort: config.INTERNAL_PORT },
+    "api listening (internal bound to loopback)",
   );
 }
 

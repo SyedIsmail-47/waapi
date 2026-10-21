@@ -10,12 +10,16 @@ export type StatusDetail = {
 export type WAClientEvents = {
   qr: (qr: string) => void;
   status: (status: SessionStatus, detail?: StatusDetail) => void;
-  /** Metadata only — never include message body fields. */
+  /**
+   * Inbound message event. `text` is for webhook delivery only —
+   * never write it to logs.
+   */
   messageMeta: (meta: {
     remoteJid: string;
     messageId: string;
     fromMe: boolean;
     messageType: string;
+    text?: string;
   }) => void;
   loggedOut: () => void;
 };

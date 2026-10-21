@@ -1,0 +1,11 @@
+title = "waapi"
+
+# Allowlist known CI / unit-test fixture placeholders only.
+# Live secrets must never be committed.
+[[allowlists]]
+description = "CI and unit-test JWT/key fixtures (not live credentials)"
+paths = [
+  '''^\.github/workflows/ci\.yml$''',
+  '''^apps/api/src/config\.ts$''',
+  '''^apps/api/src/config\.test\.ts$''',
+]

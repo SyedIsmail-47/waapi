@@ -4,29 +4,34 @@
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "pnpm -r run build",
     "dev:worker": "pnpm --filter @waapi/worker dev",
     "dev:api": "pnpm --filter @waapi/api dev",
+    "dev:webhooks": "pnpm --filter @waapi/api dev:webhooks",
     "dev:dashboard": "pnpm --filter @waapi/dashboard dev",
     "lint": "eslint .",
-    "typecheck": "pnpm --filter @waapi/shared build && pnpm -r run typecheck",
+    "typecheck": "pnpm --filter @waapi/shared build && pnpm --filter @waapi/db build && pnpm -r run typecheck",
     "test": "vitest run",
-    "pretest": "pnpm --filter @waapi/shared build",
+    "pretest": "pnpm --filter @waapi/shared build && pnpm --filter @waapi/db build",
     "test:watch": "vitest",
     "format": "prettier --write .",
-    "db:generate": "pnpm --filter @waapi/worker db:generate",
-    "db:migrate": "pnpm --filter @waapi/worker db:migrate",
+    "db:generate": "pnpm --filter @waapi/db db:generate",
+    "db:migrate": "pnpm --filter @waapi/db db:migrate",
     "seed": "tsx scripts/seed.ts",
     "cli": "tsx scripts/cli.ts",
     "ram-probe": "tsx scripts/ram-probe.ts",
-    "docker:up": "docker compose up -d",
-    "docker:down": "docker compose down"
+    "docker:up": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d",
+    "docker:down": "docker compose -f docker-compose.yml -f docker-compose.dev.yml down",
+    "docker:up:prod": "docker compose -f docker-compose.yml --profile prod up -d --build",
+    "check:compose-prod": "powershell -NoProfile -File scripts/check-compose-prod.ps1",
+    "smoke:prod": "tsx scripts/smoke-prod.ts"
   },
   "dependencies": {
-    "@waapi/shared": "workspace:*"
+    "@waapi/shared": "workspace:*",
+    "uuid": "11.1.1"
   },
   "devDependencies": {
     "@eslint/js": "9.17.0",

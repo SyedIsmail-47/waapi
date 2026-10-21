@@ -21,6 +21,20 @@ function messageTypeOf(msg: Record<string, unknown> | null | undefined): string 
   return keys[0] ?? "unknown";
 }
 
+/** Extract conversation / extended-text body for webhook payloads (not for logs). */
+function messageTextOf(msg: Record<string, unknown> | null | undefined): string | undefined {
+  if (!msg) return undefined;
+  if (typeof msg.conversation === "string" && msg.conversation.length) {
+    return msg.conversation;
+  }
+  const ext = msg.extendedTextMessage;
+  if (ext && typeof ext === "object" && ext !== null) {
+    const text = (ext as { text?: unknown }).text;
+    if (typeof text === "string" && text.length) return text;
+  }
+  return undefined;
+}
+
 export async function createBaileysClient(args: {
   sessionId: string;
   accountId: string;
@@ -143,12 +157,15 @@ export async function createBaileysClient(args: {
         const remoteJid = msg.key.remoteJid;
         const messageId = msg.key.id;
         if (!remoteJid || !messageId) continue;
+        const message = msg.message as Record<string, unknown> | null;
         const meta = {
           remoteJid,
           messageId,
           fromMe: Boolean(msg.key.fromMe),
-          messageType: messageTypeOf(msg.message as Record<string, unknown> | null),
+          messageType: messageTypeOf(message),
+          text: messageTextOf(message),
         };
+        // Never log message text.
         log.info(
           {
             sessionId,

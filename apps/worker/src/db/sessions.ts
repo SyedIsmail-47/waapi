@@ -52,6 +52,8 @@ export async function createSessionTransactional(
   input: CreateSessionInput,
 ) {
   return db.transaction(async (tx) => {
+    // Serialize creates per account so concurrent Promise.all cannot overshoot maxSessions.
+    await tx.execute(sql`select id from accounts where id = ${input.accountId} for update`);
     const accountRows = await tx
       .select()
       .from(accounts)
@@ -161,6 +163,25 @@ export async function markLoggedOutAndWipeAuth(
       .returning();
     return row ?? null;
   });
+}
+
+/**
+ * After logout confirmation: if API marked deleted_at, remove session row
+ * (keys/webhook cascade or cleaned by API finalizeDeletedSessions).
+ */
+export async function hardDeleteIfSoftDeleted(
+  db: Db["db"],
+  accountId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: sessions.id, deletedAt: sessions.deletedAt })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!row?.deletedAt) return false;
+  await db.delete(sessions).where(eq(sessions.id, sessionId));
+  return true;
 }
 
 /** Boot sweep: delete orphaned auth rows for any session already logged_out. */

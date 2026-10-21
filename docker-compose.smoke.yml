@@ -1,0 +1,29 @@
+# Smoke overlay for `pnpm smoke:prod`.
+# Adds Mailpit and production-safe email settings for the API container.
+services:
+  mailpit:
+    image: axllent/mailpit:v1.21
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  api:
+    environment:
+      NODE_ENV: production
+      EMAIL_DRIVER: smtp
+      SMTP_URL: smtp://mailpit:1025
+      EMAIL_FROM: noreply@waapi.smoke.local
+      DEV_RETURN_TOKENS: "false"
+      ALLOW_HTTP_WEBHOOKS: "false"
+      ENABLE_DOCS: "false"
+      GLOBAL_MAX_SESSIONS: ${GLOBAL_MAX_SESSIONS:-100}
+      DEFAULT_ACCOUNT_MAX_SESSIONS: ${DEFAULT_ACCOUNT_MAX_SESSIONS:-1}
+    depends_on:
+      mailpit:
+        condition: service_started
