@@ -9,7 +9,11 @@ type AuthSession = {
   password: string;
 };
 
-function assertRateLimited(res: { statusCode: number; headers: Record<string, unknown>; json: () => unknown }) {
+function assertRateLimited(res: {
+  statusCode: number;
+  headers: Record<string, unknown>;
+  json: () => unknown;
+}) {
   expect(res.statusCode).toBe(429);
   const retryAfter = res.headers["retry-after"] ?? res.headers["Retry-After"];
   expect(retryAfter, "Retry-After header required").toBeTruthy();
@@ -23,19 +27,25 @@ function assertRateLimited(res: { statusCode: number; headers: Record<string, un
   expect(body.error?.requestId!.length).toBeGreaterThan(0);
 }
 
-describe("rate-limit responses", () => {
+describe("rate-limit tiers", () => {
   let app: BuiltApp;
-  let redis: { keys: (p: string) => Promise<string[]>; del: (...k: string[]) => Promise<number> };
+  let redis: {
+    keys: (p: string) => Promise<string[]>;
+    del: (...k: string[]) => Promise<number>;
+    set: (key: string, value: string, ...args: Array<string | number>) => Promise<unknown>;
+  };
   const accountIds = new Set<string>();
-  const loginIp = "203.0.113.10";
-  const globalIp = "203.0.113.20";
-  const accountIp = "203.0.113.30";
+  const patIp = "203.0.113.40";
+  const garbageIp = "203.0.113.41";
+  const loginIp = "203.0.113.42";
+  const accountIp = "203.0.113.43";
 
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
     process.env.DEV_RETURN_TOKENS = "true";
     process.env.ALLOW_HTTP_WEBHOOKS = "true";
-    process.env.RATE_LIMIT_MAX = "5";
+    process.env.RATE_LIMIT_IP_MAX = "600";
+    process.env.RATE_LIMIT_FAILED_AUTH_MAX = "30";
     process.env.RATE_LIMIT_LOGIN = "3";
     process.env.RATE_LIMIT_REGISTER = "10000";
     process.env.RATE_LIMIT_REFRESH = "10000";
@@ -43,7 +53,8 @@ describe("rate-limit responses", () => {
     process.env.RATE_LIMIT_RESET_PASSWORD = "10000";
     process.env.RATE_LIMIT_VERIFY_EMAIL = "10000";
     process.env.RATE_LIMIT_RESEND_VERIFICATION = "10000";
-    process.env.RATE_LIMIT_ACCOUNT_MAX = "4";
+    process.env.RATE_LIMIT_ACCOUNT_MAX = "300";
+    process.env.SEND_RATE_LIMIT_MAX = "120";
     process.env.RATE_LIMIT_WINDOW = "1 minute";
     if (!process.env.DATABASE_URL || !process.env.REDIS_URL) {
       throw new Error("DATABASE_URL and REDIS_URL required");
@@ -57,8 +68,8 @@ describe("rate-limit responses", () => {
   });
 
   afterAll(async () => {
-    // Restore high caps so sibling test files in the same worker do not inherit probe limits.
-    process.env.RATE_LIMIT_MAX = "10000";
+    process.env.RATE_LIMIT_IP_MAX = "10000";
+    process.env.RATE_LIMIT_FAILED_AUTH_MAX = "10000";
     process.env.RATE_LIMIT_LOGIN = "10000";
     process.env.RATE_LIMIT_REGISTER = "10000";
     process.env.RATE_LIMIT_REFRESH = "10000";
@@ -67,6 +78,7 @@ describe("rate-limit responses", () => {
     process.env.RATE_LIMIT_VERIFY_EMAIL = "10000";
     process.env.RATE_LIMIT_RESEND_VERIFICATION = "10000";
     process.env.RATE_LIMIT_ACCOUNT_MAX = "10000";
+    process.env.SEND_RATE_LIMIT_MAX = "10000";
     if (!app) return;
     try {
       const { accounts } = await import("@waapi/db");
@@ -115,7 +127,60 @@ describe("rate-limit responses", () => {
     };
   }
 
-  it("login limit: inject over RATE_LIMIT_LOGIN returns 429 + Retry-After + body", async () => {
+  it("valid PAT: 200 requests/min from one IP all succeed (200)", async () => {
+    const auth = await registerVerifyLogin("rl-pat-ok", patIp);
+    const patRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/tokens",
+      remoteAddress: patIp,
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+      payload: { name: "probe-pat" },
+    });
+    expect(patRes.statusCode).toBe(201);
+    const pat = patRes.json<{ token: string }>().token;
+
+    const bucketKeys = await redis.keys(`rl:acct:${auth.accountId}:*`);
+    if (bucketKeys.length) await redis.del(...bucketKeys);
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 200; i++) {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/sessions",
+        remoteAddress: patIp,
+        headers: { authorization: `Bearer ${pat}` },
+      });
+      statuses.push(res.statusCode);
+      expect(res.statusCode).toBeLessThan(500);
+    }
+    expect(statuses.every((s) => s === 200)).toBe(true);
+    expect(statuses).toHaveLength(200);
+  }, 60_000);
+
+  it("garbage tokens: 401 then 429 after RATE_LIMIT_FAILED_AUTH_MAX", async () => {
+    const failedMax = Number(process.env.RATE_LIMIT_FAILED_AUTH_MAX);
+    const statuses: number[] = [];
+    let limited: Awaited<ReturnType<BuiltApp["inject"]>> | undefined;
+    for (let i = 0; i < failedMax + 5; i++) {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/sessions",
+        remoteAddress: garbageIp,
+        headers: { authorization: `Bearer garbage-${randomUUID()}` },
+      });
+      statuses.push(res.statusCode);
+      expect(res.statusCode).toBeLessThan(500);
+      if (res.statusCode === 429) {
+        limited = res;
+        break;
+      }
+    }
+    expect(statuses.filter((s) => s === 401).length).toBe(failedMax);
+    expect(limited).toBeTruthy();
+    assertRateLimited(limited!);
+  });
+
+  it("login route limit still returns 429 + Retry-After + body", async () => {
     const statuses: number[] = [];
     let limited: Awaited<ReturnType<BuiltApp["inject"]>> | undefined;
     for (let i = 0; i < 8; i++) {
@@ -136,30 +201,7 @@ describe("rate-limit responses", () => {
     assertRateLimited(limited!);
   });
 
-  it("global limit: garbage bearer tokens yield 429, never 500", async () => {
-    const statuses: number[] = [];
-    let limited: Awaited<ReturnType<BuiltApp["inject"]>> | undefined;
-    for (let i = 0; i < 20; i++) {
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/v1/sessions",
-        remoteAddress: globalIp,
-        headers: { authorization: `Bearer garbage-${randomUUID()}` },
-      });
-      statuses.push(res.statusCode);
-      expect(res.statusCode).toBeLessThan(500);
-      if (res.statusCode === 429) {
-        limited = res;
-        break;
-      }
-    }
-    expect(statuses.some((s) => s === 401)).toBe(true);
-    expect(limited).toBeTruthy();
-    assertRateLimited(limited!);
-    expect(statuses.every((s) => s === 401 || s === 429)).toBe(true);
-  });
-
-  it("per-account limit: shared bucket across two PATs of the same account", async () => {
+  it("per-account limit: two PATs of the same account share one bucket", async () => {
     const auth = await registerVerifyLogin("rl-acct", accountIp);
     const patTokens: string[] = [];
     for (const name of ["pat-a", "pat-b"]) {
@@ -174,38 +216,26 @@ describe("rate-limit responses", () => {
       patTokens.push(created.json<{ token: string }>().token);
     }
 
-    const bucketKeys = await redis.keys(`rl:acct:${auth.accountId}:*`);
-    if (bucketKeys.length) await redis.del(...bucketKeys);
+    const windowSec = 60;
+    const redisKey = `rl:acct:${auth.accountId}:${Math.floor(Date.now() / (windowSec * 1000))}`;
+    // Config ACCOUNT_MAX=300: leave one slot, then second PAT must 429.
+    await redis.set(redisKey, "299", "EX", windowSec);
 
-    const accountMax = Number(process.env.RATE_LIMIT_ACCOUNT_MAX);
-    const statusesA: number[] = [];
-    let limitedA: Awaited<ReturnType<BuiltApp["inject"]>> | undefined;
-    for (let i = 0; i < accountMax + 3; i++) {
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/v1/sessions",
-        // Distinct IPs so the global IP bucket does not fire first.
-        remoteAddress: `198.51.100.${10 + i}`,
-        headers: { authorization: `Bearer ${patTokens[0]}` },
-      });
-      statusesA.push(res.statusCode);
-      expect(res.statusCode).toBeLessThan(500);
-      if (res.statusCode === 429) {
-        limitedA = res;
-        break;
-      }
-    }
-    expect(statusesA.filter((s) => s === 200).length).toBe(accountMax);
-    expect(limitedA).toBeTruthy();
-    assertRateLimited(limitedA!);
-
-    const withOtherPat = await app.inject({
+    const first = await app.inject({
       method: "GET",
       url: "/api/v1/sessions",
-      remoteAddress: "198.51.100.200",
+      remoteAddress: "198.51.100.11",
+      headers: { authorization: `Bearer ${patTokens[0]}` },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/api/v1/sessions",
+      remoteAddress: "198.51.100.12",
       headers: { authorization: `Bearer ${patTokens[1]}` },
     });
-    expect(withOtherPat.statusCode).toBeLessThan(500);
-    assertRateLimited(withOtherPat);
+    expect(second.statusCode).toBeLessThan(500);
+    assertRateLimited(second);
   });
 });

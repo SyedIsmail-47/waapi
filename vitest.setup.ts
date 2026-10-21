@@ -22,7 +22,8 @@ process.env.DEV_RETURN_TOKENS ??= "true";
 process.env.ALLOW_HTTP_WEBHOOKS ??= "true";
 process.env.ENABLE_DOCS ??= "false";
 // Integration suites register many times from one IP; avoid .env prod-ish caps.
-process.env.RATE_LIMIT_MAX = "10000";
+process.env.RATE_LIMIT_IP_MAX = "10000";
+process.env.RATE_LIMIT_FAILED_AUTH_MAX = "10000";
 process.env.RATE_LIMIT_REGISTER = "10000";
 process.env.RATE_LIMIT_LOGIN = "10000";
 process.env.RATE_LIMIT_REFRESH = "10000";

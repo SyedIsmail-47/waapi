@@ -23,7 +23,8 @@ describe("Phase 2 round 3", () => {
     process.env.NODE_ENV = "test";
     process.env.DEV_RETURN_TOKENS = "true";
     process.env.ALLOW_HTTP_WEBHOOKS = "true";
-    process.env.RATE_LIMIT_MAX = "10000";
+    process.env.RATE_LIMIT_IP_MAX = "10000";
+    process.env.RATE_LIMIT_FAILED_AUTH_MAX = "10000";
     process.env.RATE_LIMIT_ACCOUNT_MAX = "10000";
     if (!process.env.DATABASE_URL || !process.env.REDIS_URL) {
       throw new Error("DATABASE_URL and REDIS_URL required");
