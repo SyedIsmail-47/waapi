@@ -76,8 +76,12 @@ const envSchema = z.object({
   /** Optional JSON map of older outbox keys: {"v0":"<base64|hex>"} */
   PAYLOAD_ENCRYPTION_KEY_RING: z.string().optional(),
   BRAND_NAME: z.string().default("waapi"),
-  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+  /** Generous pre-auth per-IP ceiling (all routes). */
+  RATE_LIMIT_IP_MAX: z.coerce.number().int().positive().default(600),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+  /** Failed bearer/auth attempts per IP before 429. */
+  RATE_LIMIT_FAILED_AUTH_MAX: z.coerce.number().int().positive().default(30),
+  /** Authenticated requests per account (plan default). */
   RATE_LIMIT_ACCOUNT_MAX: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_LOGIN: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_REGISTER: z.coerce.number().int().positive().default(5),
@@ -87,7 +91,8 @@ const envSchema = z.object({
   RATE_LIMIT_VERIFY_EMAIL: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_RESEND_VERIFICATION: z.coerce.number().int().positive().default(5),
   RESEND_VERIFICATION_COOLDOWN_SECONDS: z.coerce.number().int().positive().default(60),
-  SEND_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+  /** Per-account send-message ceiling (stricter than account default). */
+  SEND_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
   /** No default — required in production; optional elsewhere for tests. */
   GLOBAL_MAX_SESSIONS: z.coerce.number().int().positive().optional(),
   DEFAULT_ACCOUNT_MAX_SESSIONS: z.coerce.number().int().positive().default(1),

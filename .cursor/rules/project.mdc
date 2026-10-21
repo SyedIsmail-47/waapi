@@ -59,3 +59,15 @@ HARD RULES
 PROCESS: Always produce a plan first and wait for approval. Small,
 reviewable commits with clear messages. CI config (lint, typecheck, test)
 from Phase 1.
+
+MERGE / TAG / CI GATES
+18. Never merge a PR unless every required check is green on the PR head
+    commit — that means both build AND gitleaks (and any other required
+    checks). A green build with a failed gitleaks (or the reverse) is not
+    enough to merge.
+19. Never merge a PR and never create or push a git tag without my explicit
+    go-ahead in the current conversation. Prior-round "do not merge/tag"
+    instructions are overridden only by a clear, current request to merge
+    or tag.
+20. Never use `gh pr merge --admin`, `--repo` tricks, or any other means to
+    bypass branch protection or failing checks.

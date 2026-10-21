@@ -1,15 +1,6 @@
 import fp from "fastify-plugin";
 import { ZodError } from "zod";
 
-/** Zod may be duplicated across the workspace; instanceof alone is unreliable. */
-function isZodValidation(error: unknown): boolean {
-  if (error instanceof ZodError) return true;
-  if (!error || typeof error !== "object") return false;
-  const value = error as { name?: string; issues?: unknown; validation?: unknown };
-  if (value.validation) return true;
-  return value.name === "ZodError" && Array.isArray(value.issues);
-}
-
 export default fp(async (app) => {
   app.setErrorHandler((error, request, reply) => {
     const value = error as Error & {
@@ -18,7 +9,8 @@ export default fp(async (app) => {
       validation?: unknown;
       after?: string | number;
     };
-    const validation = isZodValidation(error);
+    // Single workspace Zod (pnpm override) — instanceof is reliable again.
+    const validation = value instanceof ZodError || Boolean(value.validation);
     /**
      * Cause of prior rate-limit 500s: @fastify/rate-limit throws
      * errorResponseBuilder()'s return value. When that was a plain

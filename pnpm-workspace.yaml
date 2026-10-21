@@ -4,6 +4,7 @@ packages:
 
 overrides:
   uuid: 11.1.1
+  zod: 3.25.76
   "@fastify/static": 10.1.4
   "bullmq>uuid": 11.1.1
   "@fastify/swagger-ui>@fastify/static": 10.1.4
