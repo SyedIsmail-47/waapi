@@ -9,6 +9,7 @@ import { PatsPage } from "@/pages/PatsPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { SessionDetailPage } from "@/pages/SessionDetailPage";
 import { SessionsPage } from "@/pages/SessionsPage";
+import { BillingPage } from "@/pages/BillingPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SignupPage } from "@/pages/SignupPage";
 import { VerifyEmailPage } from "@/pages/VerifyEmailPage";
@@ -56,6 +57,7 @@ export function AppRoutes() {
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
           <Route path="/messages" element={<MessagesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings/billing" element={<BillingPage />} />
           <Route path="/settings/tokens" element={<PatsPage />} />
         </Route>
       </Route>

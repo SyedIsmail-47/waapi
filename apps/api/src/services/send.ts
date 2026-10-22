@@ -57,6 +57,9 @@ export async function sendText(
   key: string,
   requestId: string,
 ): Promise<SendResponse> {
+  const { assertBillingAllowsUse } = await import("./billing/index.js");
+  await assertBillingAllowsUse(database, accountId);
+
   const bodyHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const claimId = randomUUID();
 

@@ -12,7 +12,29 @@ pnpm seed
 pnpm dev:api
 pnpm dev:worker
 pnpm dev:dashboard
+pnpm build:site   # prerendered marketing site -> apps/site/dist
 ```
+
+### Public site (Phase 4 WP-J)
+
+Static multi-page HTML + Tailwind (no SPA), output in `apps/site/dist` for Cloudflare Pages.
+
+```bash
+# Build (injects brand + legal placeholders from env)
+BRAND_NAME=waapi \
+LEGAL_NAME="LEGAL_NAME" \
+LEGAL_ADDRESS="[registered address]" \
+MERCHANT_OF_RECORD=false \
+PUBLIC_APP_URL=https://app.example.com \
+CONTACT_EMAIL=support@example.com \
+pnpm build:site
+```
+
+- Routes: `/`, `/pricing/`, `/docs/`, `/terms/`, `/privacy/`, `/refund/`, `/aup/`, `/contact/`
+- Pricing caps come from `packages/shared/src/plans.ts` (same as billing design).
+- Legal pages are marked **DRAFT** for lawyer review. Set `MERCHANT_OF_RECORD=true` to include the merchant-of-record clause on Terms.
+- Cloudflare Pages: project root `apps/site`, build command `pnpm --filter @waapi/site build` (or monorepo install + build), output directory `dist`. No secrets in the static bundle — only public placeholders.
+- Dashboard signup checkbox stores `users.terms_version` + `users.terms_accepted_at` (migration `0009_terms_accepted`). Set `VITE_PUBLIC_SITE_URL` on the dashboard so Terms/Privacy links point at the marketing site.
 
 ### Dashboard (Phase 3)
 
@@ -31,6 +53,13 @@ curl -sS -X POST "http://127.0.0.1:3001/internal/admin/invites" \
 ```
 
 Smoke overlay sets `SIGNUPS_MODE=open` so Playwright can register without invites.
+
+### Billing (Phase 4 WP-F)
+
+- Design: `docs/design/billing.md`. Default `BILLING_PROVIDER=manual`, `TRIAL_DAYS=3`.
+- Dashboard: `/settings/billing` — plan/status; upgrade CTA contacts support (or Paddle checkout URL when configured).
+- Enforcement: expired → `402 BILLING_EXPIRED` on create session / send.
+- Paddle sandbox webhook: `POST /api/v1/billing/webhooks/paddle` (signature verified; events idempotent).
 
 ### Session dashboard actions (Phase 4 WP-E)
 

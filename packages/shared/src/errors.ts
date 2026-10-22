@@ -24,6 +24,8 @@ export const ERROR_CODES = [
   "SIGNUPS_CLOSED",
   "INVITE_INVALID",
   "INVITE_REQUIRED",
+  "BILLING_EXPIRED",
+  "BILLING_INVALID_TRANSITION",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

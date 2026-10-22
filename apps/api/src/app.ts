@@ -14,6 +14,7 @@ import errorHandler from "./plugins/error-handler.js";
 import rateLimit from "./plugins/rate-limit.js";
 import requestId from "./plugins/request-id.js";
 import authRoutes from "./routes/v1/auth.js";
+import billingRoutes from "./routes/v1/billing.js";
 import healthRoutes from "./routes/v1/health.js";
 import messageRoutes from "./routes/v1/messages.js";
 import sendRoutes from "./routes/v1/send.js";
@@ -103,6 +104,7 @@ export async function buildApp(): Promise<BuiltApp> {
   await app.register(authPlugin);
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: "/api/v1/auth" });
+  await app.register(billingRoutes, { prefix: "/api/v1" });
   await app.register(sessionRoutes, { prefix: "/api/v1/sessions" });
   await app.register(sendRoutes, { prefix: "/api/v1" });
   await app.register(messageRoutes, { prefix: "/api/v1/messages" });
