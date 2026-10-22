@@ -22,6 +22,7 @@
     "db:migrate": "pnpm --filter @waapi/db db:migrate",
     "seed": "tsx scripts/seed.ts",
     "cli": "tsx scripts/cli.ts",
+    "admin": "tsx scripts/admin-cli.ts",
     "ram-probe": "tsx scripts/ram-probe.ts",
     "docker:up": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d",
     "docker:down": "docker compose -f docker-compose.yml -f docker-compose.dev.yml down",

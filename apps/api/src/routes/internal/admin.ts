@@ -4,7 +4,15 @@ import { register } from "prom-client";
 import { createInviteBodySchema } from "@waapi/shared";
 import { z } from "zod";
 import { config } from "../../config.js";
-import { createInviteCode } from "../../services/invites.js";
+import {
+  adminCreateInvite,
+  adminSetPlan,
+  findUser,
+  forceSessionLogout,
+  listFailingWebhooks,
+  revokeAllKeys,
+  suspendAccount,
+} from "../../services/admin-ops.js";
 import { redis } from "../../services/queues.js";
 
 /** Must match apps/worker fake-control-bus channel. */
@@ -27,10 +35,74 @@ const routes: FastifyPluginAsync = async (app) => {
     reply.type(register.contentType).send(await register.metrics()),
   );
 
+  app.get("/users", async (request) => {
+    const q = z.object({ q: z.string().min(1).max(320) }).parse(request.query).q;
+    return { items: await findUser(app.database, q) };
+  });
+
+  app.post<{ Params: { accountId: string } }>(
+    "/accounts/:accountId/suspend",
+    async (request, reply) => {
+      await suspendAccount(
+        app.database,
+        z.string().uuid().parse(request.params.accountId),
+        true,
+      );
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { accountId: string } }>(
+    "/accounts/:accountId/unsuspend",
+    async (request, reply) => {
+      await suspendAccount(
+        app.database,
+        z.string().uuid().parse(request.params.accountId),
+        false,
+      );
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { accountId: string } }>(
+    "/accounts/:accountId/plan",
+    async (request, reply) => {
+      const accountId = z.string().uuid().parse(request.params.accountId);
+      const planCode = z
+        .object({ planCode: z.enum(["trial", "starter", "pro", "enterprise"]) })
+        .parse(request.body).planCode;
+      await adminSetPlan(app.database, accountId, planCode);
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { accountId: string } }>(
+    "/accounts/:accountId/revoke-keys",
+    async (request, reply) => {
+      await revokeAllKeys(app.database, z.string().uuid().parse(request.params.accountId));
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { sessionId: string } }>(
+    "/sessions/:sessionId/force-logout",
+    async (request, reply) => {
+      await forceSessionLogout(app.database, z.string().uuid().parse(request.params.sessionId));
+      return reply.code(202).send({ queued: true });
+    },
+  );
+
+  app.get("/webhooks/failing", async (request) => {
+    const limit = z
+      .object({ limit: z.coerce.number().int().min(1).max(200).optional() })
+      .parse(request.query).limit;
+    return { items: await listFailingWebhooks(app.database, limit) };
+  });
+
   /** Create a single-use invite code (plaintext returned once). */
   app.post("/invites", async (request, reply) => {
     const input = createInviteBodySchema.parse(request.body ?? {});
-    const created = await createInviteCode(app.database, {
+    const created = await adminCreateInvite(app.database, {
       expiresInHours: input.expiresInHours,
       note: input.note,
     });
