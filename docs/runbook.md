@@ -30,18 +30,18 @@ NODE_ENV=production pnpm preflight
 
 ```bash
 export DATABASE_URL=...   # not echoed
-export AGE_RECIPIENTS=age1...
-export BACKUP_DEST=/var/backups/waapi
-export BACKUP_RCLONE_REMOTE=b2:waapi-backups   # write-only remote
+export AGE_RECIPIENTS=age1...          # public recipient only
+export BACKUP_DEST=<local-backup-dir>
+export BACKUP_RCLONE_REMOTE=<rclone-remote>:<bucket>   # write-only remote
 ./scripts/backup-pg.sh
 # Restore on a scratch host that has the private identity:
-AGE_IDENTITY=/secure/age-identity.txt \
-  ./scripts/restore-pg.sh --input waapi-....sql.gz.age
+AGE_IDENTITY=<path-to-age-identity> \
+  ./scripts/restore-pg.sh --input <dump>.sql.gz.age
 ```
 
-3. **nginx + Cloudflare Origin CA** — `deploy/nginx.conf` expects `/etc/ssl/cloudflare/origin.pem` + `origin.key`. Firewall 443 to Cloudflare IPs only; set `TRUST_CLOUDFLARE=true` when the proxy is live.
+3. **nginx + Cloudflare Origin CA** — `deploy/nginx.conf` expects Origin CA cert/key paths under your TLS directory (see comments in that file). Firewall 443 to Cloudflare IPs only; set `TRUST_CLOUDFLARE=true` when the proxy is live.
 
-4. **Log rotation** — install `deploy/logrotate.waapi.conf` as `/etc/logrotate.d/waapi` (nginx + `/var/log/waapi/*.log`).
+4. **Log rotation** — install `deploy/logrotate.waapi.conf` into the host logrotate conf directory (nginx + app log paths as configured on the host).
 
 ### Public site (Phase 4 WP-J)
 

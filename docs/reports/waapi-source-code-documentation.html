@@ -24,6 +24,7 @@
     <div><strong>Document type:</strong> Source code documentation</div>
     <div><strong>Companion:</strong> Project Report PDF</div>
     <div><strong>Root:</strong> <code>waapi/</code> (git repo)</div>
+    <div><strong>Tip:</strong> phase-4 / phase-5-parity @ 19a400a</div>
     <div><strong>Date:</strong> 22 October 2026</div>
   </div>
 </section>
@@ -42,7 +43,7 @@ waapi/
 ├── deploy/               # nginx + logrotate (host install)
 ├── docs/                 # Runbook, design, reports
 ├── scripts/              # CLI, admin, preflight, backup, smoke
-├── .github/workflows/    # CI (build + gitleaks)
+├── .github/workflows/    # CI: build + gitleaks + e2e
 ├── docker-compose*.yml
 ├── package.json          # Workspace scripts
 ├── pnpm-workspace.yaml
@@ -67,7 +68,7 @@ waapi/
 apps/api/src/
 ├── index.ts                 # HTTP listen (public)
 ├── webhooks-main.ts         # Optional webhook delivery process
-├── app.ts                   # buildApp / buildInternalApp
+├── app.ts                   # buildApp / buildInternalApp (+ billing sweeper)
 ├── config.ts                # Zod env + production guards
 ├── types.ts
 ├── plugins/
@@ -82,48 +83,58 @@ apps/api/src/
 │   │   ├── send.ts
 │   │   ├── messages.ts
 │   │   ├── webhooks.ts
-│   │   ├── billing.ts
+│   │   ├── billing.ts       # checkout + Paddle webhook (raw Buffer)
 │   │   └── health.ts
-│   ├── internal/admin.ts    # x-admin-secret ops + metrics
+│   ├── internal/admin.ts    # x-admin-secret ops + metrics + manual-review
 │   ├── response-schemas.ts
 │   └── route-schemas.test.ts
 ├── services/
 │   ├── auth.ts
 │   ├── sessions.ts
-│   ├── send.ts
+│   ├── send.ts / send-limits.ts
 │   ├── messages.ts
 │   ├── tokens.ts
 │   ├── invites.ts
 │   ├── email.ts
+│   ├── disconnect-alerts.ts
 │   ├── admin-ops.ts
 │   ├── queues.ts
 │   ├── retention.ts
-│   ├── billing/             # provider, paddle, state-machine
+│   ├── billing/             # provider, paddle, state-machine, sweeper
 │   └── webhooks/            # sign, SSRF, deliveries
-├── lib/                     # cookies, crypto, turnstile, phone, …
+├── lib/                     # cookies, crypto, turnstile, phone, log-redact
 ├── workers/                 # outbox-poller, webhook-delivery
-└── *.integration.test.ts    # acceptance / matrix / tenant
+└── *.integration.test.ts    # acceptance / matrix / tenant / billing
 </pre>
 
 <h3>3.1 Public API surface (prefix <code>/api/v1</code>)</h3>
 <table>
   <tr><th>Area</th><th>Notable routes</th></tr>
   <tr><td>Auth</td><td><code>POST /auth/register</code>, <code>/login</code>, <code>/refresh</code>, <code>/logout</code>, <code>/verify-email</code>, <code>/forgot-password</code>, <code>/reset-password</code>, <code>/change-password</code>, <code>/delete-account</code>, <code>GET /auth/me</code>, <code>GET /auth/signup-config</code>, PAT CRUD</td></tr>
-  <tr><td>Sessions</td><td>CRUD-ish: create, get, list, PATCH rename, connect, disconnect, logout, delete, keys, status/QR</td></tr>
-  <tr><td>Send</td><td><code>POST .../send-message</code> (text; idempotency-key)</td></tr>
+  <tr><td>Sessions</td><td>create, get, list, PATCH rename, connect, disconnect, logout, delete, keys, status/QR</td></tr>
+  <tr><td>Send</td><td><code>POST .../send-message</code> (text; idempotency-key; send-limit 429)</td></tr>
   <tr><td>Messages</td><td><code>GET /messages</code> metadata</td></tr>
   <tr><td>Webhooks</td><td>endpoint upsert/delete/test; delivery listing</td></tr>
   <tr><td>Billing</td><td><code>GET /billing</code>, <code>POST /billing/checkout</code>, <code>POST /billing/webhooks/paddle</code></td></tr>
   <tr><td>Health</td><td><code>/health</code>, <code>/ready</code></td></tr>
 </table>
 
-<h3>3.2 Internal admin (<code>:3001</code>, header <code>x-admin-secret</code>)</h3>
+<h3>3.2 Paddle webhook (N1)</h3>
+<p>
+  Route registers a content-type parser with <code>parseAs: 'buffer'</code> for that path only.
+  Signature: <code>Paddle-Signature</code> <code>ts</code> + one or more <code>h1</code> (rotation) over exactly
+  <code>ts:rawBody</code>, constant-time compare, ±5 minute tolerance. Never re-stringify.
+  Bad signature → generic 401. Duplicate event id → 200 no-op.
+</p>
+
+<h3>3.3 Internal admin (<code>:3001</code>, header <code>x-admin-secret</code>)</h3>
 <ul>
   <li><code>GET /internal/admin/users?q=</code></li>
   <li><code>POST .../accounts/:id/suspend|unsuspend|plan|revoke-keys</code></li>
   <li><code>POST .../sessions/:id/force-logout</code></li>
   <li><code>GET .../failing-webhooks</code></li>
   <li><code>POST .../invites</code></li>
+  <li>Manual review flagging (refunds / paused / mismatched events)</li>
   <li>Prometheus metrics</li>
 </ul>
 <p>CLI wrapper: <code>scripts/admin-cli.ts</code> → <code>pnpm admin -- &lt;cmd&gt;</code>. Actions audit-logged; no message bodies.</p>
@@ -145,20 +156,21 @@ apps/worker/src/
 │   ├── auth-state.ts        # AES-GCM Postgres auth
 │   └── wa-client.contract.test.ts
 ├── session/
-│   ├── manager.ts           # connect, QR, reconnect, caps
+│   ├── manager.ts           # connect, QR, reconnect, caps, PHONE_IN_USE
 │   ├── reconnect.ts
-│   └── disconnect-reason.ts
+│   ├── disconnect-reason.ts
+│   └── disconnect-alerts.ts
 ├── jobs/
 │   ├── send-text.ts
 │   ├── session-commands.ts
 │   └── queues.ts
 ├── redis/                   # lease, node-lock, pubsub, commands
 ├── crypto/                  # aes, key-ring
-└── db/                      # sessions helpers, tenant-isolation.test
+└── db/                      # sessions helpers, phone-in-use, tenant-isolation
 </pre>
 <p>
   Driver selection: <code>WA_DRIVER=baileys|fake</code>. Fake is for tests/smoke
-  (<code>SMOKE_MODE</code> required in production if fake is set).
+  (<code>SMOKE_MODE</code> required in production if fake is set — production boot refuses fake).
 </p>
 
 <h2>5. Folder tree — apps/dashboard</h2>
@@ -176,7 +188,9 @@ apps/dashboard/src/
 │   ├── SettingsPage.tsx     # password, resend verify, delete
 │   └── BillingPage.tsx
 ├── components/              # ui + auth (Turnstile)
-├── lib/api-client.ts        # CSRF header + refresh
+├── lib/
+│   ├── api-client.ts        # CSRF header + refresh
+│   └── friendly-errors.ts   # PHONE_IN_USE, billing, send-limit copy
 └── …
 apps/dashboard/e2e/
 ├── smoke.spec.ts
@@ -190,6 +204,7 @@ apps/site/
 ├── src/input.css            # Tailwind entry
 ├── tailwind.config.js
 ├── build.test.ts            # asserts DRAFT legal + disclaimer + pricing
+├── placeholder-guard.test.ts
 └── dist/                    # build output (gitignored) — CF Pages
 </pre>
 <p>Routes: <code>/</code>, <code>/pricing/</code>, <code>/docs/</code>, <code>/terms/</code>, <code>/privacy/</code>, <code>/refund/</code>, <code>/aup/</code>, <code>/contact/</code>.</p>
@@ -199,9 +214,9 @@ apps/site/
 <pre>
 packages/shared/src/
 ├── brand.ts                 # getBrandName, token prefixes, headers
-├── plans.ts                 # PLANS, getPlan, PUBLIC_PLAN_CODES
+├── plans.ts                 # PLANS, send limits / warm-up, PUBLIC_PLAN_CODES
 ├── constants.ts             # statuses, queues, CURRENT_TERMS_VERSION
-├── errors.ts                # ERROR_CODES incl. BILLING_*, INVITE_*, TERMS_*
+├── errors.ts                # ERROR_CODES incl. BILLING_*, SESSION_SEND_LIMIT, PHONE_IN_USE
 ├── schemas/
 │   ├── auth.ts              # registerBodySchema (acceptTerms: true)
 │   ├── session.ts
@@ -222,6 +237,7 @@ packages/db/
     ├── 0008_invite_codes.sql
     ├── 0009_billing.sql
     ├── 0010_terms_accepted.sql
+    ├── 0011_wp_n.sql
     └── meta/_journal.json
 </pre>
 <table>
@@ -230,6 +246,7 @@ packages/db/
   <tr><td>0008</td><td><code>invite_codes</code></td></tr>
   <tr><td>0009</td><td><code>subscriptions</code>, <code>billing_events</code></td></tr>
   <tr><td>0010</td><td><code>users.terms_version</code>, <code>users.terms_accepted_at</code></td></tr>
+  <tr><td>0011</td><td><code>manual_review_*</code>, disconnect alert columns, <code>session_send_counters</code></td></tr>
 </table>
 <p>Rule: migrations are additive and sequentially numbered. Do not rewrite applied SQL.</p>
 
@@ -237,34 +254,38 @@ packages/db/
 <table>
   <tr><th>Script</th><th>Purpose</th></tr>
   <tr><td><code>cli.ts</code></td><td>Dev session CLI</td></tr>
-  <tr><td><code>admin-cli.ts</code></td><td>Internal admin ops</td></tr>
+  <tr><td><code>admin-cli.ts</code></td><td>Internal admin ops (incl. manual-review)</td></tr>
   <tr><td><code>preflight.ts</code></td><td>Production env gate</td></tr>
-  <tr><td><code>backup-pg.sh</code> / <code>restore-pg.sh</code></td><td>Encrypted dump ↔ restore</td></tr>
+  <tr><td><code>backup-pg.sh</code> / <code>restore-pg.sh</code></td><td>age-encrypted dump ↔ restore</td></tr>
   <tr><td><code>seed.ts</code></td><td>Local seed account</td></tr>
   <tr><td><code>smoke-prod.ts</code></td><td>Prod-shaped smoke</td></tr>
+  <tr><td><code>nginx-security-curl.sh</code></td><td>Header/probe checks</td></tr>
   <tr><td><code>rate-limit-probe.ps1</code></td><td>Live rate-limit probe</td></tr>
   <tr><td><code>ram-probe.ts</code></td><td>Session RAM estimate</td></tr>
+  <tr><td><code>build-review-packs.mjs</code></td><td>Regenerate review packs</td></tr>
 </table>
 
 <h2>10. deploy/</h2>
 <ul>
-  <li><code>nginx.conf</code> — TLS with Cloudflare Origin CA paths; CF IP <code>real_ip</code>; proxy <code>/api</code> → API, <code>/</code> → dashboard</li>
+  <li><code>nginx.conf</code> — TLS with Cloudflare Origin CA; HSTS/CSP; CF IP <code>real_ip</code>; proxy <code>/api</code> → API, <code>/</code> → dashboard; <code>/internal</code> blocked</li>
   <li><code>logrotate.waapi.conf</code> — sample for nginx + <code>/var/log/waapi</code></li>
+  <li><code>nginx-security.test.ts</code> — config assertions</li>
 </ul>
 
 <h2>11. Cross-cutting concerns</h2>
 <h3>11.1 Security</h3>
 <ul>
   <li>Argon2id passwords; hashed tokens; AES-GCM auth state &amp; outbox payloads</li>
+  <li>Pino redaction paths for auth headers/cookies/tokens/passwords/text</li>
   <li>Turnstile on auth forms; rate limits (IP / failed auth / account / route)</li>
   <li>Webhook URL SSRF checks; signed outbound deliveries</li>
-  <li>Gitleaks in CI; preflight rejects placeholders and <code>EMAIL_DRIVER=console</code> in prod</li>
+  <li>Gitleaks + Playwright e2e in CI; preflight rejects placeholders and console email in prod</li>
 </ul>
 <h3>11.2 Multi-tenancy</h3>
 <ul>
   <li>All session/message/webhook queries scoped by <code>account_id</code></li>
   <li>Cross-account access → 404 (or 403 where policy says so)</li>
-  <li>Tests: <code>phase-2.integration.test.ts</code>, <code>session-ux</code>, <code>worker/.../tenant-isolation.test.ts</code></li>
+  <li>Tests: phase-2 integration, session-ux, worker tenant-isolation</li>
 </ul>
 <h3>11.3 Privacy logging rule</h3>
 <p>Do not put secrets, refresh tokens, PAT/session keys, or message bodies in logs or plaintext DB columns meant for ops. Encrypted blobs are OK; audit meta must stay metadata-only.</p>
@@ -275,32 +296,37 @@ packages/db/
   <tr><td><code>phase-2-round3.integration.test.ts</code></td><td>Route matrix (no 5xx)</td></tr>
   <tr><td><code>invite-gate.integration.test.ts</code></td><td>WP-B signup modes</td></tr>
   <tr><td><code>terms-acceptance.integration.test.ts</code></td><td>WP-J terms</td></tr>
-  <tr><td><code>billing.integration.test.ts</code> + state-machine / webhook-replay</td><td>WP-F</td></tr>
+  <tr><td><code>billing.integration.test.ts</code> + state-machine / webhook-replay / paddle-*</td><td>WP-F / N1–N3</td></tr>
+  <tr><td><code>billing-enforcement-matrix.integration.test.ts</code></td><td>N4</td></tr>
+  <tr><td><code>auth-cookies-production.test.ts</code></td><td>N5</td></tr>
+  <tr><td><code>send-limits.test.ts</code> / <code>disconnect-alerts.test.ts</code> / <code>sweeper.test.ts</code></td><td>WP-N core</td></tr>
   <tr><td><code>admin-ops.integration.test.ts</code></td><td>WP-G</td></tr>
   <tr><td><code>account-lifecycle.integration.test.ts</code></td><td>WP-D</td></tr>
   <tr><td><code>session-ux.integration.test.ts</code></td><td>WP-E</td></tr>
-  <tr><td><code>auth-cookies.integration.test.ts</code></td><td>CSRF / cookies</td></tr>
-  <tr><td><code>apps/site/build.test.ts</code></td><td>Static site build</td></tr>
-  <tr><td><code>scripts/preflight.test.ts</code></td><td>WP-L preflight</td></tr>
+  <tr><td><code>phone-in-use.test.ts</code></td><td>PHONE_IN_USE mapping</td></tr>
+  <tr><td><code>apps/site/build.test.ts</code> + placeholder-guard</td><td>Static site / WP-M</td></tr>
+  <tr><td><code>scripts/preflight.test.ts</code> / backup-restore</td><td>WP-L</td></tr>
+  <tr><td><code>e2e/smoke.spec.ts</code> + <code>fake-driver.spec.ts</code></td><td>N6 Playwright</td></tr>
   <tr><td><code>wa-client.contract.test.ts</code></td><td>Fake ↔ real driver contract</td></tr>
 </table>
+<p>Last full suite: <strong>306 passed | 2 skipped</strong> (308).</p>
 
 <h2>13. Config entry points</h2>
 <ul>
   <li>API: <code>apps/api/src/config.ts</code> (<code>validateConfigEnv</code>)</li>
   <li>Worker: <code>apps/worker/src/config.ts</code></li>
   <li>Example env: <code>.env.example</code></li>
-  <li>CI env: <code>.github/workflows/ci.yml</code></li>
+  <li>CI env: <code>.github/workflows/ci.yml</code> (build, gitleaks, e2e)</li>
 </ul>
 
 <h2>14. Suggested reading order (for Claude / new engineers)</h2>
 <ol>
   <li><code>README.md</code> → <code>docs/runbook.md</code></li>
   <li><code>packages/shared/src/plans.ts</code> + <code>schemas/auth.ts</code></li>
-  <li><code>packages/db/src/schema.ts</code> + drizzle journal</li>
-  <li><code>apps/api/src/app.ts</code> → <code>routes/v1/*</code> → <code>services/*</code></li>
+  <li><code>packages/db/src/schema.ts</code> + drizzle journal through 0011</li>
+  <li><code>apps/api/src/app.ts</code> → <code>routes/v1/*</code> → <code>services/billing/*</code></li>
   <li><code>apps/worker/src/baileys/types.ts</code> → <code>session/manager.ts</code></li>
-  <li><code>docs/design/billing.md</code></li>
+  <li><code>docs/design/billing.md</code> + private ops pack (security triage, not published)</li>
   <li>This PDF + Project Report PDF</li>
 </ol>
 

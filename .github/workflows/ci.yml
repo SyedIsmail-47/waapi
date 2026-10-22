@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Least privilege by default; jobs add only what they need.
+# No pull_request_target (would run fork PR code with base-repo secrets).
+permissions:
+  contents: read
+
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
@@ -25,6 +30,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: []
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:16-alpine
@@ -95,6 +102,8 @@ jobs:
     name: e2e (smoke + playwright)
     runs-on: ubuntu-latest
     needs: []
+    permissions:
+      contents: read
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -138,8 +147,13 @@ jobs:
                   lines.append(line)
           p.write_text("\n".join(lines) + "\n")
           PY
-          grep -E '^(ADMIN_API_SECRET)=' .env | head -1 > /tmp/admin_secret_line
-          echo "ADMIN_API_SECRET loaded (value not printed)"
+          # Confirm key present without printing its value
+          if grep -qE '^ADMIN_API_SECRET=.+' .env; then
+            echo "ADMIN_API_SECRET loaded (value not printed)"
+          else
+            echo "ADMIN_API_SECRET missing after smoke env generation" >&2
+            exit 1
+          fi
       - name: Build and start smoke stack
         run: |
           docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod up -d --build
