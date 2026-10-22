@@ -30,7 +30,21 @@ pnpm --filter @waapi/dashboard exec playwright install chromium
 DASHBOARD_BASE_URL=http://127.0.0.1:8080 pnpm --filter @waapi/dashboard test:e2e
 ```
 
-Playwright is local/smoke-oriented in Phase 3 (not required in CI yet).
+### Fake WhatsApp driver (Phase 4 WP-A)
+
+Set `WA_DRIVER=fake` on the worker (smoke overlay sets this; production forbids unless `SMOKE_MODE=true`).
+
+Simulate QR scan (worker must be subscribed to Redis `waapi:fake:control`):
+
+```bash
+curl -sS -X POST "http://127.0.0.1:3001/internal/admin/fake/sessions/$SESSION_ID/scan" \
+  -H "x-admin-secret: $ADMIN_API_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"phoneNumber":"+15550001111"}'
+```
+
+Also: `.../inbound`, `.../ban`. Contract tests: `apps/worker/src/baileys/wa-client.contract.test.ts`.  
+Playwright: `apps/dashboard/e2e/fake-driver.spec.ts` (needs `ADMIN_API_SECRET`).
 
 ### Email / production env
 
