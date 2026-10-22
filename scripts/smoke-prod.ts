@@ -114,7 +114,7 @@ async function main() {
     const reg = await fetch("http://127.0.0.1:3000/api/v1/auth/register", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password, name: "smoke" }),
+      body: JSON.stringify({ email, password, name: "smoke", acceptTerms: true }),
     });
     const regBody = await reg.text();
     console.log("register", reg.status, regBody.slice(0, 200));

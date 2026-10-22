@@ -100,7 +100,7 @@ describe("Phase 2 API integration", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: label },
+      payload: {email, password, name: label, acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     const registration = registered.json<{
@@ -140,7 +140,7 @@ describe("Phase 2 API integration", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password: "correct-horse-battery-staple", name: "gated" },
+      payload: {email, password: "correct-horse-battery-staple", name: "gated", acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     const body = registered.json<Record<string, unknown>>();
@@ -157,7 +157,7 @@ describe("Phase 2 API integration", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password: "correct-horse-battery-staple", name: "prod" },
+      payload: {email, password: "correct-horse-battery-staple", name: "prod", acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     expect(registered.json()).not.toHaveProperty("verificationToken");

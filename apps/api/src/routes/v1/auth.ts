@@ -56,6 +56,7 @@ const routes: FastifyPluginAsync = async (app) => {
         password: input.password,
         name: input.name,
         inviteCode: input.inviteCode,
+        acceptTerms: input.acceptTerms,
       },
       clientIp(request),
     );

@@ -24,7 +24,7 @@ describe("auth cookies + CSRF + /me", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: "Cookie User" },
+      payload: {email, password, name: "Cookie User", acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     const body = registered.json<{ verificationToken?: string; userId: string; accountId: string }>();

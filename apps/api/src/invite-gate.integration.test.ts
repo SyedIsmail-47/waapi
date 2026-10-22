@@ -79,7 +79,11 @@ describe("WP-B invite gate", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password: "correct-horse-battery-staple" },
+      payload: {
+        email,
+        password: "correct-horse-battery-staple",
+        acceptTerms: true,
+      },
     });
     expect(res.statusCode).toBe(201);
     accountIds.add(res.json<{ accountId: string }>().accountId);
@@ -94,6 +98,7 @@ describe("WP-B invite gate", () => {
         email: `closed-${crypto.randomUUID()}@example.test`,
         password: "correct-horse-battery-staple",
         inviteCode: "whatever-long-enough",
+        acceptTerms: true,
       },
     });
     expect(res.statusCode).toBe(403);
@@ -109,6 +114,7 @@ describe("WP-B invite gate", () => {
       payload: {
         email: `need-invite-${crypto.randomUUID()}@example.test`,
         password: "correct-horse-battery-staple",
+        acceptTerms: true,
       },
     });
     expect(res.statusCode).toBe(400);
@@ -127,6 +133,7 @@ describe("WP-B invite gate", () => {
         email: email1,
         password: "correct-horse-battery-staple",
         inviteCode: code,
+        acceptTerms: true,
       },
     });
     expect(first.statusCode).toBe(201);
@@ -139,6 +146,7 @@ describe("WP-B invite gate", () => {
         email: `invite-reuse-${crypto.randomUUID()}@example.test`,
         password: "correct-horse-battery-staple",
         inviteCode: code,
+        acceptTerms: true,
       },
     });
     expect(second.statusCode).toBe(400);
@@ -164,6 +172,7 @@ describe("WP-B invite gate", () => {
         email: `expired-${crypto.randomUUID()}@example.test`,
         password: "correct-horse-battery-staple",
         inviteCode: code,
+        acceptTerms: true,
       },
     });
     expect(reg.statusCode).toBe(400);

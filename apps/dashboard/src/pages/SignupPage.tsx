@@ -14,11 +14,14 @@ export function SignupPage() {
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
   const [mode, setMode] = useState<SignupMode | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const siteUrl = (import.meta.env.VITE_PUBLIC_SITE_URL as string | undefined)?.replace(/\/$/, "") || "";
 
   useEffect(() => {
     void api<{ mode: SignupMode }>("/api/v1/auth/signup-config", {
@@ -35,6 +38,11 @@ export function SignupPage() {
     setBusy(true);
     setError(null);
     try {
+      if (!acceptTerms) {
+        setError("Accept the Terms of Service to continue.");
+        setBusy(false);
+        return;
+      }
       await api("/api/v1/auth/register", {
         method: "POST",
         json: {
@@ -42,6 +50,7 @@ export function SignupPage() {
           password,
           name: name || undefined,
           inviteCode: mode === "invite" ? inviteCode : undefined,
+          acceptTerms: true as const,
           turnstileToken,
         },
         token: null,
@@ -128,9 +137,40 @@ export function SignupPage() {
             required
           />
         </div>
+        <label className="flex items-start gap-2 text-sm text-muted">
+          <input
+            type="checkbox"
+            className="mt-1"
+            data-testid="accept-terms"
+            checked={acceptTerms}
+            onChange={(e) => setAcceptTerms(e.target.checked)}
+            required
+          />
+          <span>
+            I agree to the{" "}
+            <a
+              className="text-accent underline"
+              href={siteUrl ? `${siteUrl}/terms/` : "/terms/"}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Terms
+            </a>{" "}
+            and{" "}
+            <a
+              className="text-accent underline"
+              href={siteUrl ? `${siteUrl}/privacy/` : "/privacy/"}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Privacy Policy
+            </a>
+            .
+          </span>
+        </label>
         <TurnstileField onToken={setTurnstileToken} />
         {error ? <p className="text-sm text-warn" role="alert">{error}</p> : null}
-        <Button type="submit" disabled={busy || mode == null}>
+        <Button type="submit" disabled={busy || mode == null || !acceptTerms}>
           {busy ? "Creating…" : "Sign up"}
         </Button>
       </form>

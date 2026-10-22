@@ -33,7 +33,7 @@ describe("WP-D account lifecycle", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: label },
+      payload: {email, password, name: label, acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     const body = registered.json<{
@@ -104,7 +104,7 @@ describe("WP-D account lifecycle", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password },
+      payload: {email, password, acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     // Force-verify skip — login blocked; mint JWT by verifying then clearing verified? 

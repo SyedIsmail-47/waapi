@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-paper text-ink font-sans antialiased;
+  background-image:
+    radial-gradient(1200px 600px at 10% -10%, rgba(228, 243, 234, 0.9) 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(213, 221, 215, 0.45) 0%, transparent 50%);
+}

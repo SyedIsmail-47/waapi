@@ -41,6 +41,9 @@ export const users = pgTable(
     role: text("role", { enum: MEMBER_ROLES }).notNull().default("owner"),
     isAdmin: boolean("is_admin").notNull().default(false),
     disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    /** Legal terms version accepted at signup (e.g. "2026-10-22"). */
+    termsVersion: text("terms_version"),
+    termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

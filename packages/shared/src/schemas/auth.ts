@@ -9,6 +9,8 @@ export const registerBodySchema = z.object({
   name: z.string().min(1).max(120).optional(),
   /** Required when SIGNUPS_MODE=invite. */
   inviteCode: z.string().min(8).max(128).optional(),
+  /** Must be true — stores CURRENT_TERMS_VERSION + accepted_at. */
+  acceptTerms: z.literal(true),
   turnstileToken,
 });
 
