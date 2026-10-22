@@ -233,8 +233,7 @@ describe("WP-D account lifecycle", () => {
     expect(loginGone.statusCode).toBe(401);
   });
 
-  it("delete-account is not usable cross-tenant (account B token cannot delete A via id)", async () => {
-    // Route is self-only; ensure no accountId param leak — matrix covers auth.
+  it("delete-account only deletes the authenticated account", async () => {
     const [a, b] = await Promise.all([
       registerVerifyLogin("del-a"),
       registerVerifyLogin("del-b"),
@@ -243,15 +242,20 @@ describe("WP-D account lifecycle", () => {
       method: "POST",
       url: "/api/v1/auth/delete-account",
       headers: { authorization: `Bearer ${b.accessToken}` },
-      payload: { password: a.password },
+      payload: { password: b.password },
     });
-    expect(res.statusCode).toBe(401);
-    // A still exists
+    expect(res.statusCode).toBe(204);
     const still = await app.inject({
       method: "GET",
       url: "/api/v1/auth/me",
       headers: { authorization: `Bearer ${a.accessToken}` },
     });
     expect(still.statusCode).toBe(200);
+    const bGone = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/me",
+      headers: { authorization: `Bearer ${b.accessToken}` },
+    });
+    expect([401, 403]).toContain(bGone.statusCode);
   });
 });

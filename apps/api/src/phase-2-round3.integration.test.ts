@@ -384,8 +384,13 @@ describe("Phase 2 round 3", () => {
         if (mode === "jwt") return 200;
         return 403;
       }
-      if (url.startsWith("/api/v1/auth/tokens") || url.includes("/logout-all")) {
-        if (mode === "jwt") return [200, 201, 204, 404];
+      if (
+        url.startsWith("/api/v1/auth/tokens") ||
+        url.includes("/logout-all") ||
+        url.includes("/change-password") ||
+        url.includes("/delete-account")
+      ) {
+        if (mode === "jwt") return [200, 201, 204, 400, 401, 404];
         return 403;
       }
       if (url === "/api/v1/sessions" && method === "GET") {

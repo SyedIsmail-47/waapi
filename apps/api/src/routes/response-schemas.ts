@@ -46,6 +46,8 @@ export const routeResponseSchemas: RouteResponseSchema[] = [
   { method: "POST", url: "/api/v1/auth/forgot-password", status: 202, schema: empty },
   { method: "POST", url: "/api/v1/auth/reset-password", status: 204, schema: empty },
   { method: "POST", url: "/api/v1/auth/logout-all", status: 204, schema: empty },
+  { method: "POST", url: "/api/v1/auth/change-password", status: 204, schema: empty },
+  { method: "POST", url: "/api/v1/auth/delete-account", status: 204, schema: empty },
   { method: "POST", url: "/api/v1/auth/tokens", status: 201, schema: z.object({ id: z.string().uuid(), token: z.string() }).passthrough() },
   { method: "GET", url: "/api/v1/auth/tokens", status: 200, schema: z.array(z.object({ id: z.string().uuid() }).passthrough()) },
   { method: "DELETE", url: "/api/v1/auth/tokens/:id", status: 204, schema: empty },
