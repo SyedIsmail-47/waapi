@@ -188,9 +188,9 @@ pnpm ram-probe
 ## Manual acceptance checks
 
 1. **Restart without rescan** — create session, scan QR, stop worker, start worker; status stays `connected`.
-2. **Send/receive** — CLI send + reply from phone; `message_logs` has metadata only (`notify` upserts).
-3. **Network drop** — disable network briefly; session `disconnected` then reconnects with backoff + jitter.
-4. **Phone logout** — unlink device; status `logged_out`; `wa_auth_*` rows wiped; no reconnect timer.
+2. **Send/receive** — CLI send + reply from phone; `message_logs` has metadata only (`notify` upserts). **Done** (operator: real device; outbound to a contact verified).
+3. **Network drop** — disable network briefly; session `disconnected` then reconnects with backoff + jitter. **Done** (operator).
+4. **Phone logout** — unlink device; status `logged_out`; `wa_auth_*` rows wiped; no reconnect timer. **Done** (operator).
 5. **Logs** — no message bodies, tokens, or auth state.
 6. **kill -9 worker recovery** — with a `connected` session, `kill -9` the worker PID, restart worker; session reloads (staggered) under a Redis lease (`waapi:lease:<sessionId>`), status returns to `connected` without QR rescan.
 7. **440 connectionReplaced** — open the same WhatsApp account in another client/device so Baileys gets status `440`; worker must stop reconnect, mark session `error` with reason `connection_replaced`, and not thrash reconnect.
@@ -199,12 +199,13 @@ pnpm ram-probe
 
 | Connected sessions | Worker RSS (approx) | Notes |
 |---|---|---|
-| 1 | | fill after probe |
-| 3 | | |
-| 5 | | |
-| 10 | | |
+| 0 | 74.8 MB | Baseline (`pnpm ram-probe`, in-memory slot sim, 2026-10-22) |
+| 1 | 75.3 MB | ~0.5 MB above baseline in this probe |
+| 3 | 76.8 MB | |
+| 5 | 79.3 MB | |
+| 10 | 84.3 MB | ~0.95 MB/session slot in this sim (512 KiB buffers × 2) |
 
-Use the table to set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling often ~8–20 depending on VPS RAM).
+Probe is an **in-memory session-slot** estimate (`scripts/ram-probe.ts`), not live Baileys sockets. For production caps, also compare worker RSS with 0 vs 1 real connected session on the VPS. Use the table to set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling often ~8–20 depending on VPS RAM).
 
 ## Phase 2 curl acceptance
 
@@ -293,7 +294,8 @@ does **not** auto-retry (a retry could double-send).
 
 ## RAM / caps
 
-Run `pnpm ram-probe` and fill the table above. Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.
+RSS numbers from `pnpm ram-probe` are recorded in the table under Manual acceptance §9.
+Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.
 `GLOBAL_MAX_SESSIONS` is required in production (no code default). New accounts get
 `DEFAULT_ACCOUNT_MAX_SESSIONS` (default 1).
 
