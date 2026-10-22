@@ -285,6 +285,22 @@ importers:
         specifier: 2.1.8
         version: 2.1.8(@types/node@22.10.2)(jsdom@25.0.1)
 
+  apps/site:
+    dependencies:
+      '@waapi/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+    devDependencies:
+      autoprefixer:
+        specifier: 10.4.20
+        version: 10.4.20(postcss@8.4.49)
+      postcss:
+        specifier: 8.4.49
+        version: 8.4.49
+      tailwindcss:
+        specifier: 3.4.17
+        version: 3.4.17
+
   apps/worker:
     dependencies:
       '@hapi/boom':

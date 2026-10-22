@@ -1,4 +1,5 @@
-import { createBaileysClient } from "./baileys/baileys-client.js";
+import { createWaClient } from "./baileys/create-client.js";
+import { startFakeControlBus } from "./baileys/fake-control-bus.js";
 import { loadConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { startSendTextWorker } from "./jobs/send-text.js";
@@ -34,13 +35,19 @@ async function main(): Promise<void> {
   const metrics = new SessionMetrics();
   const metricsServer = metrics.startServer(cfg.workerMetricsPort);
 
+  let fakeSub: ReturnType<typeof startFakeControlBus> | null = null;
+  if (cfg.waDriver === "fake") {
+    fakeSub = startFakeControlBus(redis, log);
+    log.warn("WA_DRIVER=fake — not for real WhatsApp traffic");
+  }
+
   const manager = new SessionManager(
     db,
     redis,
     cfg,
     log,
     async ({ sessionId, accountId }) =>
-      createBaileysClient({ sessionId, accountId, db, cfg, log }),
+      createWaClient({ sessionId, accountId, db, cfg, log }),
     metrics,
   );
 
@@ -77,6 +84,10 @@ async function main(): Promise<void> {
       await manager.shutdown();
       await nodeLock.release();
       metricsServer.close();
+      if (fakeSub) {
+        await fakeSub.unsubscribe();
+        await fakeSub.quit();
+      }
       await redis.quit();
       await client.end({ timeout: 5 });
     },

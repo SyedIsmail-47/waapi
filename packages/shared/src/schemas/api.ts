@@ -5,6 +5,10 @@ export const createSessionBodySchema = z.object({
   name: z.string().min(1).max(120),
 });
 
+export const updateSessionBodySchema = z.object({
+  name: z.string().min(1).max(120),
+});
+
 export const sendMessageBodySchema = z.object({
   sessionId: z.string().uuid(),
   to: z.string().min(1).max(64),

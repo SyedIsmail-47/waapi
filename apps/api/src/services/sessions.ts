@@ -22,6 +22,9 @@ export async function createSession(
   name: string,
   requestId: string,
 ) {
+  const { assertBillingAllowsUse } = await import("./billing/index.js");
+  await assertBillingAllowsUse(database, accountId);
+
   const session = await database.db.transaction(async (tx) => {
     await tx.execute(sql`select id from accounts where id = ${accountId} for update`);
     await tx.execute(sql`select pg_advisory_xact_lock(${GLOBAL_SESSION_LOCK})`);
@@ -113,6 +116,21 @@ export async function getSession(database: Db, accountId: string, id: string) {
 
 export async function getSessionPublic(database: Db, accountId: string, id: string) {
   return toSessionPublic(await getSession(database, accountId, id));
+}
+
+export async function renameSession(
+  database: Db,
+  accountId: string,
+  id: string,
+  name: string,
+) {
+  const row = await getSession(database, accountId, id);
+  const [updated] = await database.db
+    .update(sessions)
+    .set({ name, updatedAt: new Date() })
+    .where(eq(sessions.id, row.id))
+    .returning();
+  return toSessionPublic(updated!);
 }
 
 /**

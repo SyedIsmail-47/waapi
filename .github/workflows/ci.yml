@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Least privilege by default; jobs add only what they need.
+# No pull_request_target (would run fork PR code with base-repo secrets).
+permissions:
+  contents: read
+
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
@@ -25,6 +30,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: []
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:16-alpine
@@ -90,3 +97,93 @@ jobs:
       - run: pnpm --filter @waapi/dashboard test
       - run: pnpm db:migrate
       - run: pnpm test
+
+  e2e:
+    name: e2e (smoke + playwright)
+    runs-on: ubuntu-latest
+    needs: []
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate smoke env
+        run: |
+          set -euo pipefail
+          if [ ! -f .env ]; then
+            cp .env.example .env
+          fi
+          # Ensure non-placeholder secrets for compose (32-byte keys as base64)
+          python3 - <<'PY'
+          import os, secrets, base64, pathlib
+          p = pathlib.Path(".env")
+          text = p.read_text()
+          def b64():
+              return base64.b64encode(secrets.token_bytes(32)).decode()
+          replacements = {
+              "JWT_SECRET=": f"JWT_SECRET=ci-e2e-jwt-secret-at-least-32-chars-{secrets.token_hex(8)}",
+              "ADMIN_API_SECRET=": f"ADMIN_API_SECRET=ci-e2e-admin-secret-{secrets.token_hex(8)}",
+              "WEBHOOK_SECRET_KEY=": f"WEBHOOK_SECRET_KEY={b64()}",
+              "PAYLOAD_ENCRYPTION_KEY=": f"PAYLOAD_ENCRYPTION_KEY={b64()}",
+              "AUTH_STATE_ENCRYPTION_KEY=": f"AUTH_STATE_ENCRYPTION_KEY={b64()}",
+          }
+          lines = []
+          for line in text.splitlines():
+              done = False
+              for prefix, val in replacements.items():
+                  if line.startswith(prefix) or line.startswith("# " + prefix):
+                      lines.append(val)
+                      done = True
+                      break
+              if not done:
+                  lines.append(line)
+          p.write_text("\n".join(lines) + "\n")
+          PY
+          # Confirm key present without printing its value
+          if grep -qE '^ADMIN_API_SECRET=.+' .env; then
+            echo "ADMIN_API_SECRET loaded (value not printed)"
+          else
+            echo "ADMIN_API_SECRET missing after smoke env generation" >&2
+            exit 1
+          fi
+      - name: Build and start smoke stack
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod up -d --build
+      - name: Wait for health
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then
+              echo "healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod ps
+          docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod logs --tail=80
+          exit 1
+      - name: Install Playwright Chromium
+        run: pnpm --filter @waapi/dashboard exec playwright install --with-deps chromium
+      - name: Run Playwright e2e
+        env:
+          DASHBOARD_BASE_URL: http://127.0.0.1:8080
+          INTERNAL_BASE_URL: http://127.0.0.1:3001
+        run: |
+          set -euo pipefail
+          ADMIN_API_SECRET="$(grep -E '^ADMIN_API_SECRET=' .env | head -1 | cut -d= -f2-)"
+          export ADMIN_API_SECRET
+          pnpm --filter @waapi/dashboard test:e2e
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod logs --tail=120
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod down -v

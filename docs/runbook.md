@@ -12,7 +12,57 @@ pnpm seed
 pnpm dev:api
 pnpm dev:worker
 pnpm dev:dashboard
+pnpm build:site   # prerendered marketing site -> apps/site/dist
 ```
+
+### Go-live prep (Phase 4 WP-L — no deploy from this repo)
+
+1. **Preflight** — fails if production env is missing, placeholder, wrong 32-byte key length, `EMAIL_DRIVER=console`, or `GLOBAL_MAX_SESSIONS` unset. Never prints secrets:
+
+```bash
+NODE_ENV=production pnpm preflight
+# or load .env.production then: pnpm preflight
+```
+
+2. **Encrypted backups (`age`)** — `pg_dump` → gzip → **age public-key** → `.sha256` → **rclone** to S3-compatible storage.
+
+**Key custody:** generate an age keypair **offline**. Put only the **public** recipient (`age1…`) on the backup server (`AGE_RECIPIENTS` / `AGE_RECIPIENTS_FILE`). Keep the **private identity** off the server (password manager / HSM / sealed USB). Restore hosts alone mount `AGE_IDENTITY`. Use **write-only** rclone credentials on the backup host (no delete/list if the provider allows).
+
+```bash
+export DATABASE_URL=...   # not echoed
+export AGE_RECIPIENTS=age1...          # public recipient only
+export BACKUP_DEST=<local-backup-dir>
+export BACKUP_RCLONE_REMOTE=<rclone-remote>:<bucket>   # write-only remote
+./scripts/backup-pg.sh
+# Restore on a scratch host that has the private identity:
+AGE_IDENTITY=<path-to-age-identity> \
+  ./scripts/restore-pg.sh --input <dump>.sql.gz.age
+```
+
+3. **nginx + Cloudflare Origin CA** — `deploy/nginx.conf` expects Origin CA cert/key paths under your TLS directory (see comments in that file). Firewall 443 to Cloudflare IPs only; set `TRUST_CLOUDFLARE=true` when the proxy is live.
+
+4. **Log rotation** — install `deploy/logrotate.waapi.conf` into the host logrotate conf directory (nginx + app log paths as configured on the host).
+
+### Public site (Phase 4 WP-J)
+
+Static multi-page HTML + Tailwind (no SPA), output in `apps/site/dist` for Cloudflare Pages.
+
+```bash
+# Build (injects brand + legal placeholders from env)
+BRAND_NAME=waapi \
+LEGAL_NAME="LEGAL_NAME" \
+LEGAL_ADDRESS="[registered address]" \
+MERCHANT_OF_RECORD=false \
+PUBLIC_APP_URL=https://app.example.com \
+CONTACT_EMAIL=support@example.com \
+pnpm build:site
+```
+
+- Routes: `/`, `/pricing/`, `/docs/`, `/terms/`, `/privacy/`, `/refund/`, `/aup/`, `/contact/`
+- Pricing caps come from `packages/shared/src/plans.ts` (same as billing design).
+- Legal pages are marked **DRAFT** for lawyer review. Set `MERCHANT_OF_RECORD=true` to include the merchant-of-record clause on Terms.
+- Cloudflare Pages: project root `apps/site`, build command `pnpm --filter @waapi/site build` (or monorepo install + build), output directory `dist`. No secrets in the static bundle — only public placeholders.
+- Dashboard signup checkbox stores `users.terms_version` + `users.terms_accepted_at` (migration `0010_terms_accepted`). Set `VITE_PUBLIC_SITE_URL` on the dashboard so Terms/Privacy links point at the marketing site.
 
 ### Dashboard (Phase 3)
 
@@ -21,6 +71,69 @@ pnpm dev:dashboard
 - Auth: access token in memory only; refresh in `HttpOnly; Secure; SameSite=Strict` cookie `Path=/api/v1/auth`; CSRF double-submit cookie + `X-CSRF-Token` on cookie-mode refresh/logout.
 - Turnstile: set `TURNSTILE_SECRET_KEY` + `VITE_TURNSTILE_SITE_KEY`. Tests/smoke use `TURNSTILE_DISABLED=true` (with `SMOKE_MODE=true` only for the smoke overlay).
 - Brand: `BRAND_NAME` / `VITE_BRAND_NAME` via `@waapi/shared` + `apps/dashboard/src/brand.ts`.
+- Signups: `SIGNUPS_MODE=open|invite|closed` (default `invite`). Invite mode requires a single-use code at register; dashboard shows the field via `GET /api/v1/auth/signup-config`. Mint codes (plaintext once):
+
+```bash
+curl -sS -X POST "http://127.0.0.1:3001/internal/admin/invites" \
+  -H "x-admin-secret: $ADMIN_API_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"expiresInHours":168}'
+```
+
+Smoke overlay sets `SIGNUPS_MODE=open` so Playwright can register without invites.
+
+### Admin CLI (Phase 4 WP-G)
+
+Internal only (`INTERNAL_BASE_URL` + `ADMIN_API_SECRET`). Actions are audit-logged; no message bodies.
+
+```bash
+pnpm admin -- find-user --q user@example.com
+pnpm admin -- suspend --account <uuid>
+pnpm admin -- unsuspend --account <uuid>
+pnpm admin -- set-plan --account <uuid> --plan starter
+pnpm admin -- revoke-keys --account <uuid>
+pnpm admin -- force-logout --session <uuid>
+pnpm admin -- failing-webhooks
+pnpm admin -- create-invite --hours 168
+pnpm admin -- manual-review [--limit 50]
+```
+
+### Billing (Phase 4 WP-F / WP-N)
+
+Billing is **manual + Paddle** only (no Stripe). Design: `docs/design/billing.md`.
+
+- Default `BILLING_PROVIDER=manual`, `TRIAL_DAYS=3`.
+- Dashboard: `/settings/billing` — plan/status; upgrade CTA contacts support (or Paddle checkout URL when configured).
+- Enforcement: expired → `402 BILLING_EXPIRED` on create session / send. Billing GET and delete-account always allowed.
+- Per-plan send limits (minute/day) + 7-day warm-up → `429 SESSION_SEND_LIMIT` + `Retry-After`.
+- Disconnect / logged_out / connection_replaced emails (6h dedupe, opt-out).
+- Sweeper: trial/`past_due` past grace → `expired`; extras disconnected via queue.
+- Paddle webhook: `POST /api/v1/billing/webhooks/paddle` — verifies `Paddle-Signature` over exact raw body (`ts:rawBody`), multi-`h1` rotation, ±5m skew; never re-stringify. Duplicate `event_id` → 200 no-op.
+
+#### Paddle go-live checklist
+
+1. Create Paddle Billing sandbox (then live) notification destination → `https://<api-host>/api/v1/billing/webhooks/paddle`.
+2. Subscribe at least: `subscription.activated`, `subscription.updated`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`, `transaction.completed`, `transaction.payment_failed`, `adjustment.created`, `adjustment.updated`.
+3. Set `BILLING_PROVIDER=paddle`, `PADDLE_ENV=sandbox|production`, `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_PRICE_IDS_JSON` (plan→price id allowlist).
+4. Confirm checkout `custom_data.accountId` is set server-side from JWT (never trust client alone).
+5. Replay a signed fixture with whitespace ≠ `JSON.stringify(JSON.parse(raw))`; expect 200 then duplicate 200.
+6. Trigger a sandbox refund/`adjustment.created` → account appears in `pnpm admin -- manual-review` (no auto-suspend).
+7. Flip to live keys only after sandbox matrix pass; keep manual provider as break-glass.
+
+### Session dashboard actions (Phase 4 WP-E)
+
+Session detail: Connect/QR, Disconnect, Logout WhatsApp, Delete (confirm dialogs), Rename (`PATCH /api/v1/sessions/:id`). QR modal shows expiry copy and maps `lastError` codes to friendly text.
+
+### Account lifecycle (Phase 4 WP-D)
+
+- `POST /api/v1/auth/change-password` — JWT; revokes other refresh tokens.
+- `POST /api/v1/auth/resend-verification` — public with `{email}` or JWT with empty body.
+- `POST /api/v1/auth/delete-account` — JWT + password; enqueues WA logout per session, wipes `wa_auth_*`, revokes keys/webhooks/PATs, deletes message logs, then deletes the account.
+
+### Email links (Phase 4 WP-C)
+
+Set `PUBLIC_APP_URL` to the absolute dashboard origin (no trailing slash), e.g. `https://app.example.com`. Verify and reset emails include HTML + text with links to `/verify-email?token=…` and `/reset-password?token=…`. Brand text uses `BRAND_NAME`. Production refuses boot without `PUBLIC_APP_URL`.
+
 
 ### Playwright e2e against smoke stack
 
@@ -30,7 +143,21 @@ pnpm --filter @waapi/dashboard exec playwright install chromium
 DASHBOARD_BASE_URL=http://127.0.0.1:8080 pnpm --filter @waapi/dashboard test:e2e
 ```
 
-Playwright is local/smoke-oriented in Phase 3 (not required in CI yet).
+### Fake WhatsApp driver (Phase 4 WP-A)
+
+Set `WA_DRIVER=fake` on the worker (smoke overlay sets this; production forbids unless `SMOKE_MODE=true`).
+
+Simulate QR scan (worker must be subscribed to Redis `waapi:fake:control`):
+
+```bash
+curl -sS -X POST "http://127.0.0.1:3001/internal/admin/fake/sessions/$SESSION_ID/scan" \
+  -H "x-admin-secret: $ADMIN_API_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"phoneNumber":"+15550001111"}'
+```
+
+Also: `.../inbound`, `.../ban`. Contract tests: `apps/worker/src/baileys/wa-client.contract.test.ts`.  
+Playwright: `apps/dashboard/e2e/fake-driver.spec.ts` (needs `ADMIN_API_SECRET`).
 
 ### Email / production env
 
@@ -61,9 +188,9 @@ pnpm ram-probe
 ## Manual acceptance checks
 
 1. **Restart without rescan** — create session, scan QR, stop worker, start worker; status stays `connected`.
-2. **Send/receive** — CLI send + reply from phone; `message_logs` has metadata only (`notify` upserts).
-3. **Network drop** — disable network briefly; session `disconnected` then reconnects with backoff + jitter.
-4. **Phone logout** — unlink device; status `logged_out`; `wa_auth_*` rows wiped; no reconnect timer.
+2. **Send/receive** — CLI send + reply from phone; `message_logs` has metadata only (`notify` upserts). **Done** (operator: real device; outbound to a contact verified).
+3. **Network drop** — disable network briefly; session `disconnected` then reconnects with backoff + jitter. **Done** (operator).
+4. **Phone logout** — unlink device; status `logged_out`; `wa_auth_*` rows wiped; no reconnect timer. **Done** (operator).
 5. **Logs** — no message bodies, tokens, or auth state.
 6. **kill -9 worker recovery** — with a `connected` session, `kill -9` the worker PID, restart worker; session reloads (staggered) under a Redis lease (`waapi:lease:<sessionId>`), status returns to `connected` without QR rescan.
 7. **440 connectionReplaced** — open the same WhatsApp account in another client/device so Baileys gets status `440`; worker must stop reconnect, mark session `error` with reason `connection_replaced`, and not thrash reconnect.
@@ -72,12 +199,13 @@ pnpm ram-probe
 
 | Connected sessions | Worker RSS (approx) | Notes |
 |---|---|---|
-| 1 | | fill after probe |
-| 3 | | |
-| 5 | | |
-| 10 | | |
+| 0 | 74.8 MB | Baseline (`pnpm ram-probe`, in-memory slot sim, 2026-10-22) |
+| 1 | 75.3 MB | ~0.5 MB above baseline in this probe |
+| 3 | 76.8 MB | |
+| 5 | 79.3 MB | |
+| 10 | 84.3 MB | ~0.95 MB/session slot in this sim (512 KiB buffers × 2) |
 
-Use the table to set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling often ~8–20 depending on VPS RAM).
+Probe is an **in-memory session-slot** estimate (`scripts/ram-probe.ts`), not live Baileys sockets. For production caps, also compare worker RSS with 0 vs 1 real connected session on the VPS. Use the table to set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API (launch ceiling often ~8–20 depending on VPS RAM).
 
 ## Phase 2 curl acceptance
 
@@ -166,7 +294,8 @@ does **not** auto-retry (a retry could double-send).
 
 ## RAM / caps
 
-Run `pnpm ram-probe` and fill the table above. Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.
+RSS numbers from `pnpm ram-probe` are recorded in the table under Manual acceptance §9.
+Set `MAX_SESSIONS_PER_NODE` with headroom for Postgres/Redis/API.
 `GLOBAL_MAX_SESSIONS` is required in production (no code default). New accounts get
 `DEFAULT_ACCOUNT_MAX_SESSIONS` (default 1).
 

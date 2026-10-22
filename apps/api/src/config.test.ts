@@ -12,6 +12,7 @@ const base = {
   EMAIL_DRIVER: "resend",
   RESEND_API_KEY: "re_test_key",
   TURNSTILE_SECRET_KEY: "turnstile-test-secret",
+  PUBLIC_APP_URL: "https://app.example.test",
 };
 
 describe("production config guards", () => {
@@ -85,17 +86,34 @@ describe("production config guards", () => {
     ).toThrow(/TURNSTILE_SECRET_KEY/);
   });
 
-  it("allows TURNSTILE_DISABLED under SMOKE_MODE in production", () => {
-    const cfg = validateConfigEnv({
-      ...base,
-      NODE_ENV: "production",
-      SMOKE_MODE: "true",
-      TURNSTILE_DISABLED: "true",
-      TURNSTILE_SECRET_KEY: undefined,
-      COOKIE_SECURE: "false",
-    });
-    expect(cfg.TURNSTILE_DISABLED).toBe(true);
-    expect(cfg.COOKIE_SECURE).toBe(false);
+  it("refuses SMOKE_MODE in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        SMOKE_MODE: "true",
+      }),
+    ).toThrow(/SMOKE_MODE/);
+  });
+
+  it("refuses TURNSTILE_DISABLED in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        TURNSTILE_DISABLED: "true",
+      }),
+    ).toThrow(/TURNSTILE_DISABLED/);
+  });
+
+  it("refuses WA_DRIVER=fake in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        WA_DRIVER: "fake",
+      }),
+    ).toThrow(/WA_DRIVER/);
   });
 
   it("rejects placeholder JWT_SECRET in production", () => {
@@ -121,5 +139,35 @@ describe("production config guards", () => {
   it("DEFAULT_ACCOUNT_MAX_SESSIONS defaults to 1", () => {
     const cfg = validateConfigEnv({ ...base, NODE_ENV: "test" });
     expect(cfg.DEFAULT_ACCOUNT_MAX_SESSIONS).toBe(1);
+  });
+
+  it("SIGNUPS_MODE defaults to invite", () => {
+    const cfg = validateConfigEnv({ ...base, NODE_ENV: "test" });
+    expect(cfg.SIGNUPS_MODE).toBe("invite");
+  });
+
+  it("accepts SIGNUPS_MODE open|invite|closed", () => {
+    expect(validateConfigEnv({ ...base, NODE_ENV: "test", SIGNUPS_MODE: "open" }).SIGNUPS_MODE).toBe(
+      "open",
+    );
+    expect(
+      validateConfigEnv({ ...base, NODE_ENV: "test", SIGNUPS_MODE: "closed" }).SIGNUPS_MODE,
+    ).toBe("closed");
+  });
+
+  it("requires PUBLIC_APP_URL in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        PUBLIC_APP_URL: undefined,
+      }),
+    ).toThrow(/PUBLIC_APP_URL/);
+  });
+
+  it("defaults PUBLIC_APP_URL outside production", () => {
+    const { PUBLIC_APP_URL: _drop, ...rest } = base;
+    const cfg = validateConfigEnv({ ...rest, NODE_ENV: "test" });
+    expect(cfg.PUBLIC_APP_URL).toMatch(/^http:\/\/127\.0\.0\.1:5173$/);
   });
 });

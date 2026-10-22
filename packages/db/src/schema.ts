@@ -25,6 +25,10 @@ export const accounts = pgTable("accounts", {
   maxSessions: integer("max_sessions").notNull().default(1),
   planCode: text("plan_code").notNull().default("dev"),
   suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+  /** Set on refund/chargeback — admin CLI lists for manual review (no auto-suspend). */
+  manualReviewAt: timestamp("manual_review_at", { withTimezone: true }),
+  manualReviewReason: text("manual_review_reason"),
+  disconnectAlertsOptOut: boolean("disconnect_alerts_opt_out").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -41,6 +45,9 @@ export const users = pgTable(
     role: text("role", { enum: MEMBER_ROLES }).notNull().default("owner"),
     isAdmin: boolean("is_admin").notNull().default(false),
     disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    /** Legal terms version accepted at signup (e.g. "2026-10-22"). */
+    termsVersion: text("terms_version"),
+    termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -65,6 +72,7 @@ export const sessions = pgTable(
     nodeId: text("node_id"),
     lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    lastDisconnectAlertAt: timestamp("last_disconnect_alert_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -75,6 +83,18 @@ export const sessions = pgTable(
       .where(sql`${t.phoneNumber} is not null and ${t.status} not in ('logged_out', 'error')`),
   }),
 );
+
+/** Per-session send rate counters (minute + day buckets). */
+export const sessionSendCounters = pgTable("session_send_counters", {
+  sessionId: uuid("session_id")
+    .primaryKey()
+    .references(() => sessions.id, { onDelete: "cascade" }),
+  dayKey: text("day_key").notNull(),
+  dayCount: integer("day_count").notNull().default(0),
+  minuteKey: text("minute_key").notNull(),
+  minuteCount: integer("minute_count").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const waAuthCreds = pgTable("wa_auth_creds", {
   sessionId: uuid("session_id")
@@ -223,6 +243,73 @@ export const securityAuditLog = pgTable(
   },
   (t) => ({
     accountCreatedIdx: index("security_audit_log_account_created_idx").on(t.accountId, t.createdAt),
+  }),
+);
+
+export const SUBSCRIPTION_STATUSES = [
+  "trialing",
+  "active",
+  "past_due",
+  "canceled",
+  "expired",
+  "paused",
+] as const;
+
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    planCode: text("plan_code").notNull().default("trial"),
+    status: text("status", { enum: SUBSCRIPTION_STATUSES }).notNull().default("trialing"),
+    trialEndsAt: timestamp("trial_ends_at", { withTimezone: true }),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    graceUntil: timestamp("grace_until", { withTimezone: true }),
+    provider: text("provider").notNull().default("manual"),
+    providerCustomerId: text("provider_customer_id"),
+    providerSubscriptionId: text("provider_subscription_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountUidx: uniqueIndex("subscriptions_account_id_uidx").on(t.accountId),
+  }),
+);
+
+export const billingEvents = pgTable(
+  "billing_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    provider: text("provider").notNull(),
+    eventId: text("event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    accountId: uuid("account_id").references(() => accounts.id, { onDelete: "set null" }),
+    processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    providerEventUidx: uniqueIndex("billing_events_provider_event_uidx").on(t.provider, t.eventId),
+  }),
+);
+
+/** Single-use closed-beta invite codes (plaintext returned once at creation; only hash stored). */
+export const inviteCodes = pgTable(
+  "invite_codes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    codeHash: text("code_hash").notNull(),
+    codePrefix: text("code_prefix").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    usedByUserId: uuid("used_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    codeHashUidx: uniqueIndex("invite_codes_hash_uidx").on(t.codeHash),
   }),
 );
 

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>waapi — Project Report (Closed Beta)</title>
+  <link rel="stylesheet" href="print.css" />
+</head>
+<body>
+
+<section class="cover">
+  <div class="eyebrow">Software project report</div>
+  <h1>waapi</h1>
+  <p style="font-size:13pt;max-width:32em;color:#5c6b63;">
+    Commercial multi-tenant WhatsApp HTTP API (unofficial, Baileys-based) —
+    closed-beta software status through Phase 4 (complete).
+  </p>
+  <p>
+    <span class="badge">Phase 1–3 complete</span>
+    <span class="badge">Phase 4 Tier-1 complete</span>
+    <span class="badge">Monorepo pnpm</span>
+  </p>
+  <div class="meta">
+    <div><strong>Document type:</strong> Project report (overview for handoff / Claude)</div>
+    <div><strong>Companion doc:</strong> Source Code Documentation PDF</div>
+    <div><strong>Branch tip (at generation):</strong> phase-4 (reports refresh; includes ff02a85 + this commit)</div>
+    <div><strong>PR:</strong> https://github.com/SyedIsmail-47/waapi/pull/4 (phase-4 → main) — open, do not merge until approved</div>
+    <div><strong>Date:</strong> 22 October 2026</div>
+    <div><strong>Classification:</strong> Public engineering docs — no secrets</div>
+  </div>
+</section>
+
+<h2>1. Executive summary</h2>
+<p>
+  <strong>waapi</strong> is a pnpm monorepo that exposes a Fastify <code>/api/v1</code> API and
+  React dashboard for managing unofficial WhatsApp sessions (Baileys), outbound text send,
+  HMAC-signed webhooks, invite-gated signup, trial + Paddle billing, and an internal admin CLI.
+  A static marketing site (<code>apps/site</code>) is built for Cloudflare Pages.
+</p>
+<p>
+  Phases 1–3 (worker, API, dashboard) are shipped. Phase 4 closed-beta Tier-1 work packages
+  <strong>A–G, J, L, M, N</strong> are merged into <code>phase-4</code>. Final PR
+  <code>phase-4 → main</code> is open (#4). Empty branch <code>phase-5-parity</code> exists for
+  the next phase. Tier-2 media/groups (H) and webhook event parity (I) are intentionally not started.
+</p>
+<div class="warn">
+  <strong>Product disclaimer:</strong> Unofficial client. Not affiliated with WhatsApp or Meta.
+  Account ban risk is real and disclosed on the public site footer and legal drafts.
+</div>
+
+<h2>2. Goals of closed beta</h2>
+<ul>
+  <li>Invite-only signup with Turnstile; terms acceptance stored at register.</li>
+  <li>Deterministic <code>WA_DRIVER=fake</code> for CI/e2e without live WhatsApp.</li>
+  <li>Trial billing (default 3 days, 1 session) with 402 enforcement when expired.</li>
+  <li>Paddle webhook verification on exact raw body; plan allowlist; manual review for refunds/pauses.</li>
+  <li>Ops: preflight env check, age-encrypted off-box backups, Origin CA nginx, runbook + Paddle go-live checklist.</li>
+  <li>Never log/store message bodies, tokens, or secrets in plaintext application logs.</li>
+</ul>
+
+<h2>3. Architecture overview</h2>
+<pre>
+┌──────────────┐   same-origin    ┌─────────────┐     BullMQ      ┌──────────────┐
+│  Dashboard   │ ───────────────► │  Fastify    │ ──────────────► │   Worker     │
+│  (Vite SPA)  │   /api, cookies  │  API :3000  │   Redis queues  │  Baileys/fake│
+└──────────────┘                  │  Internal   │                 └──────┬───────┘
+                                  │  :3001      │                        │
+┌──────────────┐                  └──────┬──────┘                        │
+│ Public site  │ Cloudflare Pages        │                               │
+│ (static HTML)│                         ▼                               ▼
+└──────────────┘                  Postgres 16                      AES auth state
+                                  Redis 7                          wa_auth_* tables
+</pre>
+<table>
+  <tr><th>Component</th><th>Role</th></tr>
+  <tr><td><code>apps/api</code></td><td>Auth, sessions, send, webhooks, billing, internal admin</td></tr>
+  <tr><td><code>apps/worker</code></td><td>Session lifecycle, QR, send-text jobs, Baileys/fake driver</td></tr>
+  <tr><td><code>apps/dashboard</code></td><td>Operator UI (sessions, messages, settings, billing)</td></tr>
+  <tr><td><code>apps/site</code></td><td>Prerendered marketing + legal (DRAFT)</td></tr>
+  <tr><td><code>packages/db</code></td><td>Drizzle schema + numbered migrations 0000–0011</td></tr>
+  <tr><td><code>packages/shared</code></td><td>Zod schemas, plans, brand, error codes</td></tr>
+</table>
+
+<h2>4. Phase delivery history</h2>
+<table>
+  <tr><th>Phase</th><th>Scope</th><th>Status</th></tr>
+  <tr><td>1</td><td>Worker, encrypted auth state, CLI, compose, vitest</td><td>Done</td></tr>
+  <tr><td>2</td><td>API auth, sessions, send, webhooks, SSRF, outbox, rate limits</td><td>Done</td></tr>
+  <tr><td>3</td><td>Dashboard SPA, cookies/CSRF, Turnstile, smoke e2e</td><td>Done — tagged <code>phase-3-final</code></td></tr>
+  <tr><td>4</td><td>Closed-beta Tier-1: fake driver, invites, email/account/session UX, billing, admin, site/legal, go-live, security, reliability</td><td><strong>Complete</strong> — PR #4 open</td></tr>
+  <tr><td>5</td><td>Parity / stretch (branch created empty)</td><td><code>phase-5-parity</code> ready; H/I not started</td></tr>
+</table>
+
+<h2>5. Phase 4 work packages</h2>
+<table>
+  <tr><th>WP</th><th>Name</th><th>Tier</th><th>Result</th></tr>
+  <tr><td>A</td><td>Fake WhatsApp driver + Playwright smoke</td><td>1</td><td>Merged</td></tr>
+  <tr><td>B</td><td>Closed beta gate (<code>SIGNUPS_MODE</code>, invite codes)</td><td>1</td><td>Merged — migration 0008</td></tr>
+  <tr><td>C</td><td>Email UX (<code>PUBLIC_APP_URL</code>, HTML/text templates)</td><td>1</td><td>Merged</td></tr>
+  <tr><td>D</td><td>Account lifecycle (password, resend verify, delete)</td><td>1</td><td>Merged</td></tr>
+  <tr><td>E</td><td>Session UX (disconnect/logout/delete/rename, QR expiry)</td><td>1</td><td>Merged</td></tr>
+  <tr><td>F</td><td>Billing core (trial, plans, Paddle adapter)</td><td>1</td><td>Merged — migration 0009</td></tr>
+  <tr><td>G</td><td>Admin CLI (internal HTTP + <code>pnpm admin</code>)</td><td>1</td><td>Merged</td></tr>
+  <tr><td>J</td><td>Public site + legal + terms at signup</td><td>1</td><td>Merged — migration 0010</td></tr>
+  <tr><td>L</td><td>Go-live prep (preflight, encrypted backup, nginx Origin CA)</td><td>1</td><td>Merged — docs/scripts</td></tr>
+  <tr><td>M</td><td>Security pass (redaction, nginx, age backups, guards, ZAP triage)</td><td>1</td><td>Merged — triage kept in private ops pack</td></tr>
+  <tr><td>N</td><td>Reliability (alerts, send limits, Paddle N1–N8, e2e CI)</td><td>1</td><td>Merged — migration 0011</td></tr>
+  <tr><td>H</td><td>Media + groups</td><td>2</td><td>Not started (stretch)</td></tr>
+  <tr><td>I</td><td>Webhook event parity</td><td>2</td><td>Not started (stretch)</td></tr>
+</table>
+<p class="muted">Process: test-first per WP; merge to <code>phase-4</code> only when CI green; never merge to main until final PR; never <code>--admin</code>.</p>
+
+<h3>5.1 WP-N detail (N1–N8)</h3>
+<table>
+  <tr><th>ID</th><th>Result</th><th>Evidence</th></tr>
+  <tr><td>N1</td><td>OK</td><td>Raw Buffer parser + HMAC <code>ts:rawBody</code>, multi-h1, ±5m; never re-stringify</td></tr>
+  <tr><td>N2</td><td>OK</td><td>Price allowlist → plan; unknown price audit; customer bind from custom_data after verify</td></tr>
+  <tr><td>N3</td><td>OK</td><td>updated/paused/resumed/adjustment.* → manual review (no auto-suspend); fixtures per event</td></tr>
+  <tr><td>N4</td><td>OK</td><td>Enforcement matrix: billing states × JWT/PAT/session key × actions; BILLING_EXPIRED 402</td></tr>
+  <tr><td>N5</td><td>OK</td><td>Production cookie flags (HttpOnly/Secure/Strict/Path); logout clears</td></tr>
+  <tr><td>N6</td><td>OK</td><td>Playwright e2e job in CI; required check on public <code>main</code></td></tr>
+  <tr><td>N7</td><td>OK</td><td>OWASP ZAP baseline vs smoke: FAIL-NEW 0; triage in private ops pack</td></tr>
+  <tr><td>N8</td><td>OK</td><td>Stripe mentions removed; Paddle go-live checklist in runbook; packs + PDFs</td></tr>
+</table>
+<p>Also in WP-N: disconnect email alerts (6h dedupe, opt-out), per-plan send limits with warm-up,
+<code>PHONE_IN_USE</code> UX, billing sweeper.</p>
+
+<h2>6. Product features (what exists)</h2>
+<h3>6.1 Auth &amp; tenancy</h3>
+<ul>
+  <li>Register / login / refresh / logout with JWT access + HttpOnly refresh cookie</li>
+  <li>CSRF double-submit on cookie-mode refresh/logout; production cookie Path=/api/v1/auth</li>
+  <li>Email verify + password reset (Resend/SMTP/console drivers)</li>
+  <li><code>SIGNUPS_MODE=open|invite|closed</code> (default invite)</li>
+  <li>Terms checkbox → <code>users.terms_version</code> + <code>terms_accepted_at</code></li>
+  <li>PATs and per-session API keys; account-scoped queries (tenant isolation tests)</li>
+</ul>
+<h3>6.2 Sessions &amp; messaging</h3>
+<ul>
+  <li>Create / connect / disconnect / logout / delete / rename</li>
+  <li>QR via Redis pub/sub; fake driver for CI</li>
+  <li>Send text with idempotency; plan warm-up + day/minute send counters</li>
+  <li>Disconnect alerts (email); unique phone → <code>PHONE_IN_USE</code> 409</li>
+  <li>Webhook endpoints with HMAC signatures; SSRF-safe URL checks; encrypted outbox</li>
+</ul>
+<h3>6.3 Billing</h3>
+<ul>
+  <li>Plans in <code>packages/shared/src/plans.ts</code> (trial/starter/pro/enterprise)</li>
+  <li>States: trialing / active / past_due / canceled / expired + grace; paused flagged for review</li>
+  <li>402 <code>BILLING_EXPIRED</code> on create/send when expired; billing GET + delete-account always allowed</li>
+  <li><code>BILLING_PROVIDER=manual|paddle</code> only (no Stripe); no card data stored</li>
+  <li>5-minute billing sweeper; admin CLI <code>manual-review</code></li>
+</ul>
+<h3>6.4 Ops</h3>
+<ul>
+  <li><code>pnpm admin</code> — find user, suspend, set plan, revoke keys, force logout, invites, manual-review</li>
+  <li><code>pnpm preflight</code> — production env gate (no secret echo)</li>
+  <li><code>scripts/backup-pg.sh</code> / <code>restore-pg.sh</code> — age-encrypted dumps + sha256</li>
+  <li><code>deploy/nginx.conf</code> — Cloudflare Origin CA, HSTS/CSP, CF real_ip ranges</li>
+</ul>
+
+<h2>7. Data model (high level)</h2>
+<table>
+  <tr><th>Area</th><th>Tables (selected)</th></tr>
+  <tr><td>Tenancy</td><td>accounts, users, refresh_tokens, personal_access_tokens</td></tr>
+  <tr><td>Sessions</td><td>sessions, session_api_keys, wa_auth_creds, wa_auth_keys</td></tr>
+  <tr><td>Messaging</td><td>message_logs, outbound_messages, session_send_counters (0011)</td></tr>
+  <tr><td>Webhooks</td><td>webhook_endpoints, webhook_outbox, webhook_deliveries</td></tr>
+  <tr><td>Beta</td><td>invite_codes (0008)</td></tr>
+  <tr><td>Billing</td><td>subscriptions, billing_events (0009); accounts.manual_review_* (0011)</td></tr>
+  <tr><td>Legal</td><td>users.terms_version, terms_accepted_at (0010)</td></tr>
+  <tr><td>Reliability</td><td>disconnect_alerts_opt_out, last_disconnect_alert_at (0011)</td></tr>
+  <tr><td>Audit</td><td>security_audit_log, login_attempts</td></tr>
+</table>
+
+<h2>8. Testing &amp; CI</h2>
+<ul>
+  <li>Vitest: <strong>306 passed, 2 skipped</strong> (308 total) under <code>CI=true</code> — skips are <code>backup-restore</code> age/gzip and live-DB probes</li>
+  <li>Playwright e2e on smoke stack (signup → verify → session → fake scan); required check on public <code>main</code></li>
+  <li>GitHub Actions jobs: <code>build</code>, <code>gitleaks</code>, <code>e2e (smoke + playwright)</code>; workflow <code>permissions: contents: read</code></li>
+  <li>Stable green run example: <code>39761141553</code> (phase-4 merge tip)</li>
+  <li>Route / billing enforcement matrix tests; ZAP FAIL-NEW 0 against smoke</li>
+</ul>
+
+<h2>8.1 Manual acceptance &amp; RAM (operator)</h2>
+<ul>
+  <li><strong>Phone send/receive</strong> (incl. outbound to a contact), <strong>network drop</strong>, <strong>phone logout</strong> — completed by operator; noted in <code>docs/runbook.md</code></li>
+  <li><strong>RAM probe</strong> (<code>pnpm ram-probe</code>, in-memory slot sim, 2026-10-22): 0→74.8 MB, 1→75.3, 3→76.8, 5→79.3, 10→84.3 MB — table filled in runbook §9</li>
+  <li>Still optional on VPS: kill -9 recovery, 440 replaced, node cap, live Baileys RSS vs probe</li>
+</ul>
+
+<h2>8.2 Public exposure audit (post go-public)</h2>
+<ul>
+  <li>gitleaks + trufflehog over all refs: <strong>no secrets found</strong></li>
+  <li>Security-pass + Claude handoff removed from public tree (<code>2b2b6fe</code>); copies only in local private ops pack</li>
+  <li>Runbook host/rclone example paths sanitized to placeholders</li>
+  <li>Verdict: no credential rotation required; personal commit email still in history (noreply switch pending)</li>
+</ul>
+
+<h2>9. Known gaps &amp; risks</h2>
+<ul>
+  <li>Tier-2: media/groups send (WP-H); broader webhook event types (WP-I)</li>
+  <li>Legal pages marked <strong>DRAFT</strong> — lawyer review required before public claims</li>
+  <li>Unofficial WhatsApp protocol / ban risk</li>
+  <li>ZAP WARN-NEW items deferred/accepted (private ops pack; not published)</li>
+  <li>Nothing is auto-deployed from this repo; go-live is manual VPS + Cloudflare</li>
+  <li>PR #4 not yet merged to <code>main</code> (intentional until you approve)</li>
+  <li>Review packs (<code>review-pack-*.md</code>) are gitignored — upload privately if needed for review</li>
+</ul>
+
+<h2>10. How to run locally</h2>
+<pre>
+cp .env.example .env   # fill 32-byte keys
+pnpm install
+pnpm docker:up
+pnpm db:migrate && pnpm seed
+pnpm dev:api
+pnpm dev:worker
+pnpm dev:dashboard     # http://127.0.0.1:5173
+pnpm build:site        # apps/site/dist
+</pre>
+
+<h2>11. Documents map</h2>
+<table>
+  <tr><th>Path</th><th>Purpose</th></tr>
+  <tr><td><code>docs/runbook.md</code></td><td>Ops, smoke, admin, billing, Paddle checklist, RAM table, phone acceptance</td></tr>
+  <tr><td><code>docs/design/billing.md</code></td><td>Billing design (manual + Paddle)</td></tr>
+  <tr><td><code>docs/reports/waapi-project-report.pdf</code></td><td>This report</td></tr>
+  <tr><td><code>docs/reports/waapi-source-code-documentation.pdf</code></td><td>Source tree &amp; module guide</td></tr>
+  <tr><td>Private ops pack (local only)</td><td>WP-M/ZAP triage + Claude handoff (not in public git)</td></tr>
+</table>
+
+<div class="footer-note">
+  Generated for engineering handoff. Contains no production secrets, tokens, or message bodies.
+  Brand name is env-driven (<code>BRAND_NAME</code>); default fallback <code>waapi</code>.
+  Repo: https://github.com/SyedIsmail-47/waapi (public).
+</div>
+
+</body>
+</html>

@@ -5,15 +5,27 @@ import {
   accounts,
   emailVerificationTokens,
   loginAttempts,
+  messageLogs,
+  outboundMessages,
   passwordResetTokens,
+  personalAccessTokens,
   refreshTokens,
   securityAuditLog,
+  sessionApiKeys,
+  sessions,
   users,
+  waAuthCreds,
+  waAuthKeys,
+  webhookDeliveries,
+  webhookEndpoints,
+  webhookOutbox,
   type Db,
 } from "@waapi/db";
-import { config } from "../config.js";
+import { CURRENT_TERMS_VERSION } from "@waapi/shared";
+import { config, getSignupsMode } from "../config.js";
 import { randomToken, sha256 } from "../lib/crypto.js";
-import { defaultJobOptions, emailQueue } from "./queues.js";
+import { consumeInviteCode } from "./invites.js";
+import { defaultJobOptions, emailQueue, sessionCommandsQueue } from "./queues.js";
 
 const db = (value: Db) => value.db;
 
@@ -81,9 +93,35 @@ function isUniqueViolation(err: unknown): boolean {
 
 export async function register(
   database: Db,
-  input: { email: string; password: string; name?: string },
+  input: {
+    email: string;
+    password: string;
+    name?: string;
+    inviteCode?: string;
+    acceptTerms?: boolean;
+  },
   ip?: string,
 ) {
+  const mode = getSignupsMode();
+  if (mode === "closed") {
+    throw Object.assign(new Error("Signups are closed"), {
+      statusCode: 403,
+      code: "SIGNUPS_CLOSED",
+    });
+  }
+  if (mode === "invite" && !input.inviteCode?.trim()) {
+    throw Object.assign(new Error("Invite code required"), {
+      statusCode: 400,
+      code: "INVITE_REQUIRED",
+    });
+  }
+  if (input.acceptTerms !== true) {
+    throw Object.assign(new Error("You must accept the Terms of Service"), {
+      statusCode: 400,
+      code: "TERMS_REQUIRED",
+    });
+  }
+
   const email = input.email.trim().toLowerCase();
   const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
   let result: { account: typeof accounts.$inferSelect; user: typeof users.$inferSelect; verificationToken: string };
@@ -98,8 +136,18 @@ export async function register(
         .returning();
       const [user] = await tx
         .insert(users)
-        .values({ accountId: account!.id, email, passwordHash, role: "owner" })
+        .values({
+          accountId: account!.id,
+          email,
+          passwordHash,
+          role: "owner",
+          termsVersion: CURRENT_TERMS_VERSION,
+          termsAcceptedAt: new Date(),
+        })
         .returning();
+      if (mode === "invite") {
+        await consumeInviteCode(tx, input.inviteCode!, user!.id);
+      }
       const token = randomToken();
       await tx.insert(emailVerificationTokens).values({
         userId: user!.id,
@@ -117,6 +165,9 @@ export async function register(
     }
     throw err;
   }
+  const { ensureSubscription } = await import("./billing/index.js");
+  await ensureSubscription(database, result.account.id);
+
   await emailQueue.add(
     "verify-email",
     {
@@ -386,6 +437,115 @@ export async function logoutAll(database: Db, userId: string) {
     .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
 }
 
+export async function changePassword(
+  database: Db,
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+  keepRefreshTokenHash?: string,
+) {
+  const [user] = await db(database).select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user || user.disabledAt) {
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401, code: "UNAUTHORIZED" });
+  }
+  const ok = await argon2.verify(user.passwordHash, currentPassword);
+  if (!ok) {
+    throw Object.assign(new Error("Invalid credentials"), {
+      statusCode: 401,
+      code: "INVALID_CREDENTIALS",
+    });
+  }
+  const passwordHash = await argon2.hash(newPassword, { type: argon2.argon2id });
+  await db(database).transaction(async (tx) => {
+    await tx
+      .update(users)
+      .set({ passwordHash, updatedAt: new Date() })
+      .where(eq(users.id, userId));
+    if (keepRefreshTokenHash) {
+      await tx
+        .update(refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(
+          and(
+            eq(refreshTokens.userId, userId),
+            isNull(refreshTokens.revokedAt),
+            sql`${refreshTokens.tokenHash} <> ${keepRefreshTokenHash}`,
+          ),
+        );
+    } else {
+      await tx
+        .update(refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
+    }
+  });
+  await audit(database, { userId, accountId: user.accountId }, "auth.password_changed");
+}
+
+/**
+ * Re-auth with password, enqueue WA logout for every session, wipe auth state,
+ * revoke keys/webhooks/PATs, delete message logs, then delete the account.
+ */
+export async function deleteAccount(database: Db, userId: string, password: string) {
+  const [user] = await db(database).select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user || user.disabledAt) {
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401, code: "UNAUTHORIZED" });
+  }
+  const ok = await argon2.verify(user.passwordHash, password);
+  if (!ok) {
+    throw Object.assign(new Error("Invalid credentials"), {
+      statusCode: 401,
+      code: "INVALID_CREDENTIALS",
+    });
+  }
+  const accountId = user.accountId;
+  const sessionRows = await db(database)
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(eq(sessions.accountId, accountId));
+
+  for (const row of sessionRows) {
+    await sessionCommandsQueue.add(
+      "logout-session",
+      {
+        type: "logout-session",
+        accountId,
+        sessionId: row.id,
+        requestId: `account-delete-${row.id}`,
+      },
+      { ...defaultJobOptions, jobId: `logout-acct-del-${row.id}-${Date.now()}` },
+    );
+  }
+
+  await db(database).transaction(async (tx) => {
+    for (const row of sessionRows) {
+      await tx.delete(waAuthKeys).where(eq(waAuthKeys.sessionId, row.id));
+      await tx.delete(waAuthCreds).where(eq(waAuthCreds.sessionId, row.id));
+      await tx.delete(sessionApiKeys).where(eq(sessionApiKeys.sessionId, row.id));
+      await tx.delete(webhookDeliveries).where(eq(webhookDeliveries.sessionId, row.id));
+      await tx.delete(webhookEndpoints).where(eq(webhookEndpoints.sessionId, row.id));
+      await tx.delete(webhookOutbox).where(eq(webhookOutbox.sessionId, row.id));
+      await tx.delete(outboundMessages).where(eq(outboundMessages.sessionId, row.id));
+      await tx.delete(messageLogs).where(eq(messageLogs.sessionId, row.id));
+    }
+    await tx
+      .update(personalAccessTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(personalAccessTokens.accountId, accountId), isNull(personalAccessTokens.revokedAt)));
+    await tx
+      .update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
+    await tx.insert(securityAuditLog).values({
+      accountId,
+      userId,
+      eventType: "auth.account_deleted",
+      meta: { sessionCount: sessionRows.length },
+    });
+    await tx.delete(accounts).where(eq(accounts.id, accountId));
+  });
+}
+
 export async function verifyEmail(database: Db, token: string) {
   const hash = sha256(token);
   await db(database).transaction(async (tx) => {
@@ -411,10 +571,22 @@ export async function verifyEmail(database: Db, token: string) {
   });
 }
 
-export async function resendVerification(database: Db, emailInput: string) {
-  const email = emailInput.trim().toLowerCase();
-  const [user] = await db(database).select().from(users).where(eq(users.email, email)).limit(1);
+export async function resendVerification(
+  database: Db,
+  emailInput?: string,
+  opts?: { userId?: string },
+) {
+  let user: typeof users.$inferSelect | undefined;
+  if (opts?.userId) {
+    const [row] = await db(database).select().from(users).where(eq(users.id, opts.userId)).limit(1);
+    user = row;
+  } else if (emailInput) {
+    const email = emailInput.trim().toLowerCase();
+    const [row] = await db(database).select().from(users).where(eq(users.email, email)).limit(1);
+    user = row;
+  }
   if (!user || user.emailVerifiedAt) return;
+  const email = user.email;
 
   const { redis } = await import("./queues.js");
   const cooldownKey = `email:resend-verify:${user.id}`;

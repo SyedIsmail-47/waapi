@@ -15,20 +15,44 @@ services:
 
   api:
     environment:
-      NODE_ENV: production
+      # Must NOT be production — prod boot refuses SMOKE_MODE / fake / Turnstile-off.
+      NODE_ENV: test
       EMAIL_DRIVER: smtp
       SMTP_URL: smtp://mailpit:1025
       EMAIL_FROM: noreply@waapi.smoke.local
-      # Smoke e2e reads verificationToken from register JSON (SMOKE_MODE only).
+      # Smoke e2e reads verificationToken from register JSON.
       DEV_RETURN_TOKENS: "true"
       ALLOW_HTTP_WEBHOOKS: "false"
       ENABLE_DOCS: "false"
-      # Local smoke only — never on a customer host.
       SMOKE_MODE: "true"
       COOKIE_SECURE: "false"
       TURNSTILE_DISABLED: "true"
+      # E2e signup without minting invites; production default remains invite.
+      SIGNUPS_MODE: open
+      PUBLIC_APP_URL: http://127.0.0.1:8080
       GLOBAL_MAX_SESSIONS: ${GLOBAL_MAX_SESSIONS:-100}
       DEFAULT_ACCOUNT_MAX_SESSIONS: ${DEFAULT_ACCOUNT_MAX_SESSIONS:-1}
+    ports:
+      - "127.0.0.1:3000:3000"
+      # Fake-driver e2e hits internal admin (not exposed in production compose).
+      - "127.0.0.1:3001:3001"
     depends_on:
       mailpit:
         condition: service_started
+
+  worker:
+    environment:
+      NODE_ENV: test
+      SMOKE_MODE: "true"
+      WA_DRIVER: fake
+      FAKE_QR_DELAY_MS: "30"
+
+  webhooks:
+    environment:
+      NODE_ENV: test
+      SMOKE_MODE: "true"
+      DEV_RETURN_TOKENS: "true"
+      TURNSTILE_DISABLED: "true"
+      EMAIL_DRIVER: smtp
+      SMTP_URL: smtp://mailpit:1025
+      EMAIL_FROM: noreply@waapi.smoke.local

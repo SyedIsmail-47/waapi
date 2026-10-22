@@ -84,7 +84,8 @@ describe("sessions DB", () => {
       { id: outId, accountId, name: "out", status: "logged_out" },
       { id: okId, accountId, name: "ok", status: "disconnected" },
     ]);
-    const rows = await listSessionsToLoad(db, 100);
+    // High limit — shared CI DB may already have many boot-eligible sessions.
+    const rows = await listSessionsToLoad(db, 10_000);
     const ids = new Set(rows.map((r) => r.id));
     expect(ids.has(okId)).toBe(true);
     expect(ids.has(errId)).toBe(false);

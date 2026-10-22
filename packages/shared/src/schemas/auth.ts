@@ -7,7 +7,20 @@ export const registerBodySchema = z.object({
   email: z.string().email().max(320),
   password: z.string().min(10).max(128),
   name: z.string().min(1).max(120).optional(),
+  /** Required when SIGNUPS_MODE=invite. */
+  inviteCode: z.string().min(8).max(128).optional(),
+  /** Must be true — stores CURRENT_TERMS_VERSION + accepted_at. */
+  acceptTerms: z.literal(true),
   turnstileToken,
+});
+
+export const signupConfigResponseSchema = z.object({
+  mode: z.enum(["open", "invite", "closed"]),
+});
+
+export const createInviteBodySchema = z.object({
+  expiresInHours: z.number().int().min(1).max(24 * 365).optional(),
+  note: z.string().max(200).optional(),
 });
 
 export const loginBodySchema = z.object({
@@ -36,6 +49,15 @@ export const resetPasswordBodySchema = z.object({
 
 export const createPatBodySchema = z.object({
   name: z.string().min(1).max(80),
+});
+
+export const changePasswordBodySchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(10).max(128),
+});
+
+export const deleteAccountBodySchema = z.object({
+  password: z.string().min(1).max(128),
 });
 
 export const memberRoleSchema = z.enum(MEMBER_ROLES);

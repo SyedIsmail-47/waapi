@@ -62,6 +62,9 @@ const envSchema = z.object({
   SESSION_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
   WORKER_ID: z.string().min(1).optional(),
   SEND_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(800),
+  /** baileys (default) | fake — fake is for tests/smoke closed-beta automation. */
+  WA_DRIVER: z.enum(["baileys", "fake"]).default("baileys"),
+  FAKE_QR_DELAY_MS: z.coerce.number().int().nonnegative().default(50),
 });
 
 export type WorkerConfig = {
@@ -83,6 +86,8 @@ export type WorkerConfig = {
   sessionLeaseTtlMs: number;
   workerId: string;
   sendMinIntervalMs: number;
+  waDriver: "baileys" | "fake";
+  fakeQrDelayMs: number;
 };
 
 let cached: WorkerConfig | null = null;
@@ -101,6 +106,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   if (parsed.data.NODE_ENV === "production") {
     rejectPlaceholder("AUTH_STATE_ENCRYPTION_KEY", parsed.data.AUTH_STATE_ENCRYPTION_KEY);
     rejectPlaceholder("PAYLOAD_ENCRYPTION_KEY", parsed.data.PAYLOAD_ENCRYPTION_KEY);
+    if (env.SMOKE_MODE === "true" || env.SMOKE_MODE === "1") {
+      throw new Error("SMOKE_MODE must be false in production (use NODE_ENV=test for local smoke)");
+    }
+    if (parsed.data.WA_DRIVER === "fake") {
+      throw new Error("WA_DRIVER=fake is forbidden in production");
+    }
   }
   const keyRing = buildKeyRing({
     currentVersion: parsed.data.AUTH_STATE_KEY_VERSION,
@@ -127,6 +138,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     // Stable across restarts: explicit WORKER_ID, else hostname (not a random UUID).
     workerId: parsed.data.WORKER_ID ?? hostname(),
     sendMinIntervalMs: parsed.data.SEND_MIN_INTERVAL_MS,
+    waDriver: parsed.data.WA_DRIVER,
+    fakeQrDelayMs: parsed.data.FAKE_QR_DELAY_MS,
   };
   if (env === process.env) cached = cfg;
   return cfg;

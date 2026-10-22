@@ -1,6 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import {
+  changePasswordBodySchema,
   createPatBodySchema,
+  deleteAccountBodySchema,
   forgotPasswordBodySchema,
   loginBodySchema,
   refreshBodySchema,
@@ -9,7 +11,7 @@ import {
   verifyEmailBodySchema,
 } from "@waapi/shared";
 import { z } from "zod";
-import { isDevTokenReturnEnabled } from "../../config.js";
+import { getSignupsMode, isDevTokenReturnEnabled } from "../../config.js";
 import {
   assertCsrfForCookieMode,
   clearAuthCookies,
@@ -18,9 +20,12 @@ import {
 } from "../../lib/auth-cookies.js";
 import { authRateLimitConfig } from "../../lib/auth-rate-limit.js";
 import { clientIp } from "../../lib/client-ip.js";
+import { sha256 } from "../../lib/crypto.js";
 import { assertTurnstile } from "../../lib/turnstile.js";
 import { createPat, listPats, revokePat } from "../../services/tokens.js";
 import {
+  changePassword,
+  deleteAccount,
   forgotPassword,
   getMe,
   login,
@@ -39,12 +44,20 @@ const routes: FastifyPluginAsync = async (app) => {
     refreshToken,
   });
 
+  app.get("/signup-config", async () => ({ mode: getSignupsMode() }));
+
   app.post("/register", authRateLimitConfig("register"), async (request, reply) => {
     const input = registerBodySchema.parse(request.body);
     await assertTurnstile(input.turnstileToken, clientIp(request));
     const result = await register(
       app.database,
-      { email: input.email, password: input.password, name: input.name },
+      {
+        email: input.email,
+        password: input.password,
+        name: input.name,
+        inviteCode: input.inviteCode,
+        acceptTerms: input.acceptTerms,
+      },
       clientIp(request),
     );
     const body: {
@@ -105,9 +118,53 @@ const routes: FastifyPluginAsync = async (app) => {
     "/resend-verification",
     authRateLimitConfig("resend-verification"),
     async (request, reply) => {
-      const email = z.object({ email: z.string().email().max(320) }).parse(request.body).email;
-      await resendVerification(app.database, email);
+      const body = z
+        .object({ email: z.string().email().max(320).optional() })
+        .parse(request.body ?? {});
+      // Dashboard (JWT) may omit email — resend for the authenticated user.
+      if (request.headers.authorization?.startsWith("Bearer ") && !body.email) {
+        await app.authenticate(request, reply);
+        await resendVerification(app.database, undefined, {
+          userId: request.identity.userId,
+        });
+        return reply.code(202).send();
+      }
+      if (!body.email) {
+        throw Object.assign(new Error("Email required"), {
+          statusCode: 400,
+          code: "VALIDATION_ERROR",
+        });
+      }
+      await resendVerification(app.database, body.email);
       return reply.code(202).send();
+    },
+  );
+
+  app.post(
+    "/change-password",
+    { preHandler: app.requireAuthType("jwt") },
+    async (request, reply) => {
+      const input = changePasswordBodySchema.parse(request.body);
+      const refresh = readRefreshFromRequest(request);
+      await changePassword(
+        app.database,
+        request.identity.userId,
+        input.currentPassword,
+        input.newPassword,
+        refresh ? sha256(refresh) : undefined,
+      );
+      return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/delete-account",
+    { preHandler: app.requireAuthType("jwt") },
+    async (request, reply) => {
+      const input = deleteAccountBodySchema.parse(request.body);
+      await deleteAccount(app.database, request.identity.userId, input.password);
+      clearAuthCookies(reply);
+      return reply.code(204).send();
     },
   );
 

@@ -34,6 +34,9 @@ export const REDIS_KEY = {
 /** Fixed local seed account for Phase 1 (no auth yet). */
 export const DEFAULT_SEED_ACCOUNT_ID = "00000000-0000-4000-8000-000000000001";
 
+/** Bump when legal copy on apps/site changes and users must re-accept. */
+export const CURRENT_TERMS_VERSION = "2026-10-22";
+
 export const WEBHOOK_EVENT_TYPES = [
   "session.status",
   "qrcode.updated",

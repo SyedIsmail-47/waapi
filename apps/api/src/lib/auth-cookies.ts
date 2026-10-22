@@ -9,7 +9,10 @@ export const CSRF_HEADER = "x-csrf-token";
 const REFRESH_PATH = "/api/v1/auth";
 
 function cookieSecure(): boolean {
-  if (config.NODE_ENV === "test") return false;
+  // Prefer live process.env so production-flag tests can assert without reloading config.
+  const env = process.env.NODE_ENV ?? config.NODE_ENV;
+  if (env === "production") return true;
+  if (env === "test") return false;
   return config.COOKIE_SECURE;
 }
 

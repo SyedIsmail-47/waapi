@@ -27,12 +27,12 @@ export default fp(async (app) => {
         : 500;
     const code =
       status === 429
-        ? "RATE_LIMITED"
+        ? value.code ?? "RATE_LIMITED"
         : validation
           ? "VALIDATION_ERROR"
           : value.code ?? "INTERNAL_ERROR";
     if (status === 429 && reply.getHeader("retry-after") == null) {
-      const after = value.after;
+      const after = value.after ?? (value as { retryAfter?: unknown }).retryAfter;
       const seconds =
         typeof after === "number" && Number.isFinite(after)
           ? Math.max(1, Math.ceil(after))

@@ -57,6 +57,9 @@ export async function sendText(
   key: string,
   requestId: string,
 ): Promise<SendResponse> {
+  const { assertBillingAllowsUse } = await import("./billing/index.js");
+  await assertBillingAllowsUse(database, accountId);
+
   const bodyHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const claimId = randomUUID();
 
@@ -108,6 +111,26 @@ export async function sendText(
       statusCode: 409,
       code: "SESSION_NOT_CONNECTED",
     });
+  }
+
+  try {
+    const { assertAndIncrementSendLimit } = await import("./send-limits.js");
+    await assertAndIncrementSendLimit(database, accountId, input.sessionId);
+  } catch (err) {
+    const code =
+      err && typeof err === "object" && "code" in err
+        ? String((err as { code: string }).code)
+        : "";
+    if (code === "SESSION_SEND_LIMIT") {
+      await database.db
+        .update(idempotencyKeys)
+        .set({
+          responseStatus: 429,
+          responseBody: { id: null, status: "failed", error: "SESSION_SEND_LIMIT" },
+        })
+        .where(eq(idempotencyKeys.id, claimId));
+    }
+    throw err;
   }
 
   const to = toWhatsAppJid(input.to);

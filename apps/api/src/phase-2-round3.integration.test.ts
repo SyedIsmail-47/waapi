@@ -51,7 +51,7 @@ describe("Phase 2 round 3", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: label },
+      payload: { email, password, name: label, acceptTerms: true },
     });
     expect(registered.statusCode).toBe(201);
     const body = registered.json<{
@@ -367,6 +367,17 @@ describe("Phase 2 round 3", () => {
       ) {
         return [200, 302, 404];
       }
+      if (url.includes("/signup-config")) {
+        return 200;
+      }
+      if (url.includes("/billing/webhooks")) {
+        return [400, 401, 404];
+      }
+      if (url.startsWith("/api/v1/billing")) {
+        if (mode === "none") return 401;
+        if (mode === "jwt") return [200, 400, 404];
+        return 403;
+      }
       if (url.startsWith("/api/v1/auth/register") || url.includes("/login") ||
           url.includes("/refresh") || url.includes("/verify-email") ||
           url.includes("/resend-verification") || url.includes("/forgot-password") ||
@@ -381,8 +392,13 @@ describe("Phase 2 round 3", () => {
         if (mode === "jwt") return 200;
         return 403;
       }
-      if (url.startsWith("/api/v1/auth/tokens") || url.includes("/logout-all")) {
-        if (mode === "jwt") return [200, 201, 204, 404];
+      if (
+        url.startsWith("/api/v1/auth/tokens") ||
+        url.includes("/logout-all") ||
+        url.includes("/change-password") ||
+        url.includes("/delete-account")
+      ) {
+        if (mode === "jwt") return [200, 201, 204, 400, 401, 404];
         return 403;
       }
       if (url === "/api/v1/sessions" && method === "GET") {
@@ -422,6 +438,10 @@ describe("Phase 2 round 3", () => {
       if (url.includes("/connect") || url.includes("/disconnect") || url.includes("/logout")) {
         if (mode === "session_key") return 403;
         return [202, 404, 409];
+      }
+      if (method === "PATCH" && url.includes("/sessions/")) {
+        if (mode === "session_key") return 403;
+        return [200, 400, 404];
       }
       if (method === "GET" && url.includes("/sessions/")) {
         if (mode === "session_key") return 403;
