@@ -127,6 +127,11 @@ const envSchema = z.object({
    * for the local smoke stack only. Never set on a real customer host.
    */
   SMOKE_MODE: bool(false),
+  /**
+   * Signup gate: open (anyone), invite (single-use code required), closed (403).
+   * Default invite for closed beta. Tests/smoke typically set open.
+   */
+  SIGNUPS_MODE: z.enum(["open", "invite", "closed"]).default("invite"),
   /** Seconds a just-rotated refresh may be reused without family revoke. */
   REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().positive().default(10),
 });
@@ -204,6 +209,13 @@ export const isDevTokenReturnEnabled = (): boolean => {
   // Smoke stack may run NODE_ENV=production with SMOKE_MODE for e2e.
   if (config.SMOKE_MODE && flag) return true;
   return env !== "production" && flag;
+};
+
+/** Runtime-readable so tests can flip modes without reloading the module. */
+export const getSignupsMode = (): "open" | "invite" | "closed" => {
+  const raw = process.env.SIGNUPS_MODE ?? config.SIGNUPS_MODE;
+  if (raw === "open" || raw === "invite" || raw === "closed") return raw;
+  return config.SIGNUPS_MODE;
 };
 
 export const validateConfigEnv = loadConfig;

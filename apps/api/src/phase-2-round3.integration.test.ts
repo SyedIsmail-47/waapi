@@ -367,6 +367,9 @@ describe("Phase 2 round 3", () => {
       ) {
         return [200, 302, 404];
       }
+      if (url.includes("/signup-config")) {
+        return 200;
+      }
       if (url.startsWith("/api/v1/auth/register") || url.includes("/login") ||
           url.includes("/refresh") || url.includes("/verify-email") ||
           url.includes("/resend-verification") || url.includes("/forgot-password") ||

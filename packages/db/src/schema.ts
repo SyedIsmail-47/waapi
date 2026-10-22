@@ -226,6 +226,24 @@ export const securityAuditLog = pgTable(
   }),
 );
 
+/** Single-use closed-beta invite codes (plaintext returned once at creation; only hash stored). */
+export const inviteCodes = pgTable(
+  "invite_codes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    codeHash: text("code_hash").notNull(),
+    codePrefix: text("code_prefix").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    usedByUserId: uuid("used_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    codeHashUidx: uniqueIndex("invite_codes_hash_uidx").on(t.codeHash),
+  }),
+);
+
 export const personalAccessTokens = pgTable(
   "personal_access_tokens",
   {

@@ -11,8 +11,9 @@ import {
   users,
   type Db,
 } from "@waapi/db";
-import { config } from "../config.js";
+import { config, getSignupsMode } from "../config.js";
 import { randomToken, sha256 } from "../lib/crypto.js";
+import { consumeInviteCode } from "./invites.js";
 import { defaultJobOptions, emailQueue } from "./queues.js";
 
 const db = (value: Db) => value.db;
@@ -81,9 +82,23 @@ function isUniqueViolation(err: unknown): boolean {
 
 export async function register(
   database: Db,
-  input: { email: string; password: string; name?: string },
+  input: { email: string; password: string; name?: string; inviteCode?: string },
   ip?: string,
 ) {
+  const mode = getSignupsMode();
+  if (mode === "closed") {
+    throw Object.assign(new Error("Signups are closed"), {
+      statusCode: 403,
+      code: "SIGNUPS_CLOSED",
+    });
+  }
+  if (mode === "invite" && !input.inviteCode?.trim()) {
+    throw Object.assign(new Error("Invite code required"), {
+      statusCode: 400,
+      code: "INVITE_REQUIRED",
+    });
+  }
+
   const email = input.email.trim().toLowerCase();
   const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
   let result: { account: typeof accounts.$inferSelect; user: typeof users.$inferSelect; verificationToken: string };
@@ -100,6 +115,9 @@ export async function register(
         .insert(users)
         .values({ accountId: account!.id, email, passwordHash, role: "owner" })
         .returning();
+      if (mode === "invite") {
+        await consumeInviteCode(tx, input.inviteCode!, user!.id);
+      }
       const token = randomToken();
       await tx.insert(emailVerificationTokens).values({
         userId: user!.id,

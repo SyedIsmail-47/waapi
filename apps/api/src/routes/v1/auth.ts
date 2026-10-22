@@ -9,7 +9,7 @@ import {
   verifyEmailBodySchema,
 } from "@waapi/shared";
 import { z } from "zod";
-import { isDevTokenReturnEnabled } from "../../config.js";
+import { getSignupsMode, isDevTokenReturnEnabled } from "../../config.js";
 import {
   assertCsrfForCookieMode,
   clearAuthCookies,
@@ -39,12 +39,19 @@ const routes: FastifyPluginAsync = async (app) => {
     refreshToken,
   });
 
+  app.get("/signup-config", async () => ({ mode: getSignupsMode() }));
+
   app.post("/register", authRateLimitConfig("register"), async (request, reply) => {
     const input = registerBodySchema.parse(request.body);
     await assertTurnstile(input.turnstileToken, clientIp(request));
     const result = await register(
       app.database,
-      { email: input.email, password: input.password, name: input.name },
+      {
+        email: input.email,
+        password: input.password,
+        name: input.name,
+        inviteCode: input.inviteCode,
+      },
       clientIp(request),
     );
     const body: {

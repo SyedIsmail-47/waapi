@@ -21,6 +21,9 @@ export const ERROR_CODES = [
   "INTERNAL_ERROR",
   "NOT_READY",
   "NODE_LOCK_HELD",
+  "SIGNUPS_CLOSED",
+  "INVITE_INVALID",
+  "INVITE_REQUIRED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

@@ -1,8 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { register } from "prom-client";
+import { createInviteBodySchema } from "@waapi/shared";
 import { z } from "zod";
 import { config } from "../../config.js";
+import { createInviteCode } from "../../services/invites.js";
 import { redis } from "../../services/queues.js";
 
 /** Must match apps/worker fake-control-bus channel. */
@@ -24,6 +26,21 @@ const routes: FastifyPluginAsync = async (app) => {
   app.get("/metrics", async (_request, reply) =>
     reply.type(register.contentType).send(await register.metrics()),
   );
+
+  /** Create a single-use invite code (plaintext returned once). */
+  app.post("/invites", async (request, reply) => {
+    const input = createInviteBodySchema.parse(request.body ?? {});
+    const created = await createInviteCode(app.database, {
+      expiresInHours: input.expiresInHours,
+      note: input.note,
+    });
+    return reply.code(201).send({
+      id: created.id,
+      code: created.code,
+      codePrefix: created.codePrefix,
+      expiresAt: created.expiresAt.toISOString(),
+    });
+  });
 
   /** Fake WA driver controls — only meaningful when worker WA_DRIVER=fake. */
   app.post<{ Params: { sessionId: string } }>(
