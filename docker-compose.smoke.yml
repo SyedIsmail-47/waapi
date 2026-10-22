@@ -32,6 +32,10 @@ services:
       PUBLIC_APP_URL: http://127.0.0.1:8080
       GLOBAL_MAX_SESSIONS: ${GLOBAL_MAX_SESSIONS:-100}
       DEFAULT_ACCOUNT_MAX_SESSIONS: ${DEFAULT_ACCOUNT_MAX_SESSIONS:-1}
+    ports:
+      - "127.0.0.1:3000:3000"
+      # Fake-driver e2e hits internal admin (not exposed in production compose).
+      - "127.0.0.1:3001:3001"
     depends_on:
       mailpit:
         condition: service_started

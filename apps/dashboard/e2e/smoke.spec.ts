@@ -48,7 +48,7 @@ test.describe("dashboard smoke", () => {
     await page.getByRole("button", { name: "Done" }).click();
 
     await page.getByRole("link", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Sign out" }).click();
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   });
 });
