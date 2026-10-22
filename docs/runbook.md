@@ -21,6 +21,17 @@ pnpm dev:dashboard
 - Auth: access token in memory only; refresh in `HttpOnly; Secure; SameSite=Strict` cookie `Path=/api/v1/auth`; CSRF double-submit cookie + `X-CSRF-Token` on cookie-mode refresh/logout.
 - Turnstile: set `TURNSTILE_SECRET_KEY` + `VITE_TURNSTILE_SITE_KEY`. Tests/smoke use `TURNSTILE_DISABLED=true` (with `SMOKE_MODE=true` only for the smoke overlay).
 - Brand: `BRAND_NAME` / `VITE_BRAND_NAME` via `@waapi/shared` + `apps/dashboard/src/brand.ts`.
+- Signups: `SIGNUPS_MODE=open|invite|closed` (default `invite`). Invite mode requires a single-use code at register; dashboard shows the field via `GET /api/v1/auth/signup-config`. Mint codes (plaintext once):
+
+```bash
+curl -sS -X POST "http://127.0.0.1:3001/internal/admin/invites" \
+  -H "x-admin-secret: $ADMIN_API_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"expiresInHours":168}'
+```
+
+Smoke overlay sets `SIGNUPS_MODE=open` so Playwright can register without invites.
+
 
 ### Playwright e2e against smoke stack
 

@@ -39,3 +39,5 @@ process.env.EMAIL_DRIVER ??= "console";
 process.env.TURNSTILE_DISABLED ??= "true";
 process.env.COOKIE_SECURE ??= "false";
 process.env.REFRESH_REUSE_GRACE_SECONDS ??= "10";
+// Existing suites register freely; invite-gate tests flip SIGNUPS_MODE at runtime.
+process.env.SIGNUPS_MODE ??= "open";

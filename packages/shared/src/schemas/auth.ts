@@ -7,7 +7,18 @@ export const registerBodySchema = z.object({
   email: z.string().email().max(320),
   password: z.string().min(10).max(128),
   name: z.string().min(1).max(120).optional(),
+  /** Required when SIGNUPS_MODE=invite. */
+  inviteCode: z.string().min(8).max(128).optional(),
   turnstileToken,
+});
+
+export const signupConfigResponseSchema = z.object({
+  mode: z.enum(["open", "invite", "closed"]),
+});
+
+export const createInviteBodySchema = z.object({
+  expiresInHours: z.number().int().min(1).max(24 * 365).optional(),
+  note: z.string().max(200).optional(),
 });
 
 export const loginBodySchema = z.object({

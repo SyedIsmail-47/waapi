@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "@waapi/db";
 import type { BuiltApp } from "./app.js";
+import type { FastifyInstance } from "fastify";
 
 /**
  * WP-B closed-beta gate: SIGNUPS_MODE open|invite|closed,
@@ -8,6 +9,7 @@ import type { BuiltApp } from "./app.js";
  */
 describe("WP-B invite gate", () => {
   let app: BuiltApp;
+  let internal: FastifyInstance;
   let database: Db;
   let adminSecret: string;
   const accountIds = new Set<string>();
@@ -29,10 +31,12 @@ describe("WP-B invite gate", () => {
       throw new Error("DATABASE_URL and REDIS_URL required for invite-gate tests");
     }
 
-    const { buildApp } = await import("./app.js");
+    const { buildApp, buildInternalApp } = await import("./app.js");
     app = await buildApp();
     database = app.database;
+    internal = await buildInternalApp(database);
     await app.ready();
+    await internal.ready();
   });
 
   afterAll(async () => {
@@ -43,11 +47,11 @@ describe("WP-B invite gate", () => {
     if (accountIds.size) {
       await database.db.delete(accounts).where(inArray(accounts.id, [...accountIds]));
     }
-    await app.close();
+    await Promise.allSettled([app.close(), internal.close()]);
   });
 
   async function createInvite(expiresInHours = 24): Promise<string> {
-    const res = await app.inject({
+    const res = await internal.inject({
       method: "POST",
       url: "/internal/admin/invites",
       headers: { "x-admin-secret": adminSecret },
@@ -89,7 +93,7 @@ describe("WP-B invite gate", () => {
       payload: {
         email: `closed-${crypto.randomUUID()}@example.test`,
         password: "correct-horse-battery-staple",
-        inviteCode: "whatever",
+        inviteCode: "whatever-long-enough",
       },
     });
     expect(res.statusCode).toBe(403);
@@ -144,34 +148,14 @@ describe("WP-B invite gate", () => {
 
   it("expired invite is rejected", async () => {
     process.env.SIGNUPS_MODE = "invite";
-    const res = await app.inject({
-      method: "POST",
-      url: "/internal/admin/invites",
-      headers: { "x-admin-secret": adminSecret },
-      payload: { expiresInHours: 0, expiresInSeconds: 1 },
-    });
-    // Prefer explicit past expiry via expiresAt if supported
-    let code: string;
-    if (res.statusCode === 201) {
-      code = res.json<{ code: string }>().code;
-      const { inviteCodes } = await import("@waapi/db");
-      const { eq } = await import("drizzle-orm");
-      const { sha256 } = await import("./lib/crypto.js");
-      await database.db
-        .update(inviteCodes)
-        .set({ expiresAt: new Date(Date.now() - 60_000) })
-        .where(eq(inviteCodes.codeHash, sha256(code)));
-    } else {
-      // Fallback: create then force-expire
-      code = await createInvite(1);
-      const { inviteCodes } = await import("@waapi/db");
-      const { eq } = await import("drizzle-orm");
-      const { sha256 } = await import("./lib/crypto.js");
-      await database.db
-        .update(inviteCodes)
-        .set({ expiresAt: new Date(Date.now() - 60_000) })
-        .where(eq(inviteCodes.codeHash, sha256(code)));
-    }
+    const code = await createInvite(1);
+    const { inviteCodes } = await import("@waapi/db");
+    const { eq } = await import("drizzle-orm");
+    const { sha256 } = await import("./lib/crypto.js");
+    await database.db
+      .update(inviteCodes)
+      .set({ expiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(inviteCodes.codeHash, sha256(code)));
 
     const reg = await app.inject({
       method: "POST",
@@ -179,7 +163,7 @@ describe("WP-B invite gate", () => {
       payload: {
         email: `expired-${crypto.randomUUID()}@example.test`,
         password: "correct-horse-battery-staple",
-        inviteCode: code!,
+        inviteCode: code,
       },
     });
     expect(reg.statusCode).toBe(400);
@@ -188,7 +172,7 @@ describe("WP-B invite gate", () => {
   });
 
   it("admin create invite requires secret; wrong secret is 403", async () => {
-    const bad = await app.inject({
+    const bad = await internal.inject({
       method: "POST",
       url: "/internal/admin/invites",
       headers: { "x-admin-secret": "wrong-secret-value!!" },
@@ -196,7 +180,7 @@ describe("WP-B invite gate", () => {
     });
     expect(bad.statusCode).toBe(403);
 
-    const ok = await app.inject({
+    const ok = await internal.inject({
       method: "POST",
       url: "/internal/admin/invites",
       headers: { "x-admin-secret": adminSecret },
@@ -208,7 +192,7 @@ describe("WP-B invite gate", () => {
     expect(body).not.toHaveProperty("codeHash");
   });
 
-  it("invite codes are never stored or logged as plaintext in DB", async () => {
+  it("invite codes are never stored as plaintext in DB", async () => {
     const code = await createInvite(1);
     const { inviteCodes } = await import("@waapi/db");
     const rows = await database.db.select().from(inviteCodes);

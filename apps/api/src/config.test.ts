@@ -122,4 +122,18 @@ describe("production config guards", () => {
     const cfg = validateConfigEnv({ ...base, NODE_ENV: "test" });
     expect(cfg.DEFAULT_ACCOUNT_MAX_SESSIONS).toBe(1);
   });
+
+  it("SIGNUPS_MODE defaults to invite", () => {
+    const cfg = validateConfigEnv({ ...base, NODE_ENV: "test" });
+    expect(cfg.SIGNUPS_MODE).toBe("invite");
+  });
+
+  it("accepts SIGNUPS_MODE open|invite|closed", () => {
+    expect(validateConfigEnv({ ...base, NODE_ENV: "test", SIGNUPS_MODE: "open" }).SIGNUPS_MODE).toBe(
+      "open",
+    );
+    expect(
+      validateConfigEnv({ ...base, NODE_ENV: "test", SIGNUPS_MODE: "closed" }).SIGNUPS_MODE,
+    ).toBe("closed");
+  });
 });
