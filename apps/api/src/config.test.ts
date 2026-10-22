@@ -86,17 +86,34 @@ describe("production config guards", () => {
     ).toThrow(/TURNSTILE_SECRET_KEY/);
   });
 
-  it("allows TURNSTILE_DISABLED under SMOKE_MODE in production", () => {
-    const cfg = validateConfigEnv({
-      ...base,
-      NODE_ENV: "production",
-      SMOKE_MODE: "true",
-      TURNSTILE_DISABLED: "true",
-      TURNSTILE_SECRET_KEY: undefined,
-      COOKIE_SECURE: "false",
-    });
-    expect(cfg.TURNSTILE_DISABLED).toBe(true);
-    expect(cfg.COOKIE_SECURE).toBe(false);
+  it("refuses SMOKE_MODE in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        SMOKE_MODE: "true",
+      }),
+    ).toThrow(/SMOKE_MODE/);
+  });
+
+  it("refuses TURNSTILE_DISABLED in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        TURNSTILE_DISABLED: "true",
+      }),
+    ).toThrow(/TURNSTILE_DISABLED/);
+  });
+
+  it("refuses WA_DRIVER=fake in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        WA_DRIVER: "fake",
+      }),
+    ).toThrow(/WA_DRIVER/);
   });
 
   it("rejects placeholder JWT_SECRET in production", () => {

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>waapi — Source Code Documentation</title>
+  <link rel="stylesheet" href="print.css" />
+</head>
+<body>
+
+<section class="cover">
+  <div class="eyebrow">Software engineer documentation</div>
+  <h1>waapi — Source Code Documentation</h1>
+  <p style="font-size:13pt;max-width:34em;color:#5c6b63;">
+    Folder structure, packages, modules, migrations, routes, and test map for the
+    waapi monorepo. Intended as a navigation guide for engineers and AI assistants.
+  </p>
+  <p>
+    <span class="badge">pnpm workspace</span>
+    <span class="badge">Node 22+</span>
+    <span class="badge">TypeScript</span>
+    <span class="badge">Drizzle / Fastify / Baileys</span>
+  </p>
+  <div class="meta">
+    <div><strong>Document type:</strong> Source code documentation</div>
+    <div><strong>Companion:</strong> Project Report PDF</div>
+    <div><strong>Root:</strong> <code>waapi/</code> (git repo)</div>
+    <div><strong>Date:</strong> 22 October 2026</div>
+  </div>
+</section>
+
+<h2>1. Repository root</h2>
+<pre>
+waapi/
+├── apps/                 # Deployable applications
+│   ├── api/              # Fastify public + internal API
+│   ├── worker/           # Baileys / fake session worker
+│   ├── dashboard/        # React + Vite SPA
+│   └── site/             # Static marketing site (Tailwind prerender)
+├── packages/
+│   ├── db/               # Drizzle schema + migrations
+│   └── shared/           # Zod schemas, plans, brand, errors
+├── deploy/               # nginx + logrotate (host install)
+├── docs/                 # Runbook, design, reports
+├── scripts/              # CLI, admin, preflight, backup, smoke
+├── .github/workflows/    # CI (build + gitleaks)
+├── docker-compose*.yml
+├── package.json          # Workspace scripts
+├── pnpm-workspace.yaml
+├── vitest.config.ts
+├── eslint.config.js
+└── .env.example
+</pre>
+
+<h2>2. Workspace packages</h2>
+<table>
+  <tr><th>Package</th><th>Name</th><th>Entry</th></tr>
+  <tr><td><code>apps/api</code></td><td><code>@waapi/api</code></td><td><code>src/index.ts</code>, <code>src/app.ts</code></td></tr>
+  <tr><td><code>apps/worker</code></td><td><code>@waapi/worker</code></td><td><code>src/index.ts</code></td></tr>
+  <tr><td><code>apps/dashboard</code></td><td><code>@waapi/dashboard</code></td><td>Vite <code>src/main.tsx</code></td></tr>
+  <tr><td><code>apps/site</code></td><td><code>@waapi/site</code></td><td><code>scripts/build.mjs</code> → <code>dist/</code></td></tr>
+  <tr><td><code>packages/db</code></td><td><code>@waapi/db</code></td><td><code>src/index.ts</code> (schema + client)</td></tr>
+  <tr><td><code>packages/shared</code></td><td><code>@waapi/shared</code></td><td><code>src/index.ts</code> / <code>browser.ts</code></td></tr>
+</table>
+
+<h2>3. Folder tree — apps/api</h2>
+<pre>
+apps/api/src/
+├── index.ts                 # HTTP listen (public)
+├── webhooks-main.ts         # Optional webhook delivery process
+├── app.ts                   # buildApp / buildInternalApp
+├── config.ts                # Zod env + production guards
+├── types.ts
+├── plugins/
+│   ├── auth.ts              # JWT / PAT / session key
+│   ├── error-handler.ts
+│   ├── rate-limit.ts
+│   └── request-id.ts
+├── routes/
+│   ├── v1/
+│   │   ├── auth.ts          # register, login, me, PATs, password, delete
+│   │   ├── sessions.ts
+│   │   ├── send.ts
+│   │   ├── messages.ts
+│   │   ├── webhooks.ts
+│   │   ├── billing.ts
+│   │   └── health.ts
+│   ├── internal/admin.ts    # x-admin-secret ops + metrics
+│   ├── response-schemas.ts
+│   └── route-schemas.test.ts
+├── services/
+│   ├── auth.ts
+│   ├── sessions.ts
+│   ├── send.ts
+│   ├── messages.ts
+│   ├── tokens.ts
+│   ├── invites.ts
+│   ├── email.ts
+│   ├── admin-ops.ts
+│   ├── queues.ts
+│   ├── retention.ts
+│   ├── billing/             # provider, paddle, state-machine
+│   └── webhooks/            # sign, SSRF, deliveries
+├── lib/                     # cookies, crypto, turnstile, phone, …
+├── workers/                 # outbox-poller, webhook-delivery
+└── *.integration.test.ts    # acceptance / matrix / tenant
+</pre>
+
+<h3>3.1 Public API surface (prefix <code>/api/v1</code>)</h3>
+<table>
+  <tr><th>Area</th><th>Notable routes</th></tr>
+  <tr><td>Auth</td><td><code>POST /auth/register</code>, <code>/login</code>, <code>/refresh</code>, <code>/logout</code>, <code>/verify-email</code>, <code>/forgot-password</code>, <code>/reset-password</code>, <code>/change-password</code>, <code>/delete-account</code>, <code>GET /auth/me</code>, <code>GET /auth/signup-config</code>, PAT CRUD</td></tr>
+  <tr><td>Sessions</td><td>CRUD-ish: create, get, list, PATCH rename, connect, disconnect, logout, delete, keys, status/QR</td></tr>
+  <tr><td>Send</td><td><code>POST .../send-message</code> (text; idempotency-key)</td></tr>
+  <tr><td>Messages</td><td><code>GET /messages</code> metadata</td></tr>
+  <tr><td>Webhooks</td><td>endpoint upsert/delete/test; delivery listing</td></tr>
+  <tr><td>Billing</td><td><code>GET /billing</code>, <code>POST /billing/checkout</code>, <code>POST /billing/webhooks/paddle</code></td></tr>
+  <tr><td>Health</td><td><code>/health</code>, <code>/ready</code></td></tr>
+</table>
+
+<h3>3.2 Internal admin (<code>:3001</code>, header <code>x-admin-secret</code>)</h3>
+<ul>
+  <li><code>GET /internal/admin/users?q=</code></li>
+  <li><code>POST .../accounts/:id/suspend|unsuspend|plan|revoke-keys</code></li>
+  <li><code>POST .../sessions/:id/force-logout</code></li>
+  <li><code>GET .../failing-webhooks</code></li>
+  <li><code>POST .../invites</code></li>
+  <li>Prometheus metrics</li>
+</ul>
+<p>CLI wrapper: <code>scripts/admin-cli.ts</code> → <code>pnpm admin -- &lt;cmd&gt;</code>. Actions audit-logged; no message bodies.</p>
+
+<h2>4. Folder tree — apps/worker</h2>
+<pre>
+apps/worker/src/
+├── index.ts
+├── config.ts
+├── shutdown.ts
+├── metrics.ts
+├── logger.ts
+├── baileys/
+│   ├── types.ts             # WAClient interface
+│   ├── create-client.ts     # baileys | fake
+│   ├── baileys-client.ts
+│   ├── fake-client.ts       # deterministic QR / send / inject
+│   ├── fake-control-bus.ts
+│   ├── auth-state.ts        # AES-GCM Postgres auth
+│   └── wa-client.contract.test.ts
+├── session/
+│   ├── manager.ts           # connect, QR, reconnect, caps
+│   ├── reconnect.ts
+│   └── disconnect-reason.ts
+├── jobs/
+│   ├── send-text.ts
+│   ├── session-commands.ts
+│   └── queues.ts
+├── redis/                   # lease, node-lock, pubsub, commands
+├── crypto/                  # aes, key-ring
+└── db/                      # sessions helpers, tenant-isolation.test
+</pre>
+<p>
+  Driver selection: <code>WA_DRIVER=baileys|fake</code>. Fake is for tests/smoke
+  (<code>SMOKE_MODE</code> required in production if fake is set).
+</p>
+
+<h2>5. Folder tree — apps/dashboard</h2>
+<pre>
+apps/dashboard/src/
+├── main.tsx / App routing
+├── brand.ts                 # VITE_BRAND_NAME
+├── pages/
+│   ├── SignupPage.tsx       # invite + terms checkbox
+│   ├── LoginPage.tsx
+│   ├── VerifyEmailPage.tsx / ForgotPassword / ResetPassword
+│   ├── SessionsPage.tsx / SessionDetailPage.tsx
+│   ├── MessagesPage.tsx
+│   ├── PatsPage.tsx
+│   ├── SettingsPage.tsx     # password, resend verify, delete
+│   └── BillingPage.tsx
+├── components/              # ui + auth (Turnstile)
+├── lib/api-client.ts        # CSRF header + refresh
+└── …
+apps/dashboard/e2e/
+├── smoke.spec.ts
+└── fake-driver.spec.ts
+</pre>
+
+<h2>6. Folder tree — apps/site</h2>
+<pre>
+apps/site/
+├── scripts/build.mjs        # prerender HTML from plans + env placeholders
+├── src/input.css            # Tailwind entry
+├── tailwind.config.js
+├── build.test.ts            # asserts DRAFT legal + disclaimer + pricing
+└── dist/                    # build output (gitignored) — CF Pages
+</pre>
+<p>Routes: <code>/</code>, <code>/pricing/</code>, <code>/docs/</code>, <code>/terms/</code>, <code>/privacy/</code>, <code>/refund/</code>, <code>/aup/</code>, <code>/contact/</code>.</p>
+<p>Env at build: <code>BRAND_NAME</code>, <code>LEGAL_NAME</code>, <code>LEGAL_ADDRESS</code>, <code>MERCHANT_OF_RECORD</code>, <code>PUBLIC_APP_URL</code>, <code>CONTACT_EMAIL</code>.</p>
+
+<h2>7. packages/shared</h2>
+<pre>
+packages/shared/src/
+├── brand.ts                 # getBrandName, token prefixes, headers
+├── plans.ts                 # PLANS, getPlan, PUBLIC_PLAN_CODES
+├── constants.ts             # statuses, queues, CURRENT_TERMS_VERSION
+├── errors.ts                # ERROR_CODES incl. BILLING_*, INVITE_*, TERMS_*
+├── schemas/
+│   ├── auth.ts              # registerBodySchema (acceptTerms: true)
+│   ├── session.ts
+│   ├── api.ts / commands.ts / events.ts
+├── payload-crypto.ts
+├── types.ts
+├── index.ts                 # Node export
+└── browser.ts               # Dashboard-safe export (no Node-only)
+</pre>
+
+<h2>8. packages/db — schema &amp; migrations</h2>
+<pre>
+packages/db/
+├── src/schema.ts            # drizzle tables
+├── src/client.ts / migrate.ts
+└── drizzle/
+    ├── 0000_phase1.sql … 0007_…
+    ├── 0008_invite_codes.sql
+    ├── 0009_billing.sql
+    ├── 0010_terms_accepted.sql
+    └── meta/_journal.json
+</pre>
+<table>
+  <tr><th>Migration</th><th>Adds</th></tr>
+  <tr><td>0000–0007</td><td>Core accounts/sessions/auth/webhooks/outbound/outbox</td></tr>
+  <tr><td>0008</td><td><code>invite_codes</code></td></tr>
+  <tr><td>0009</td><td><code>subscriptions</code>, <code>billing_events</code></td></tr>
+  <tr><td>0010</td><td><code>users.terms_version</code>, <code>users.terms_accepted_at</code></td></tr>
+</table>
+<p>Rule: migrations are additive and sequentially numbered. Do not rewrite applied SQL.</p>
+
+<h2>9. scripts/</h2>
+<table>
+  <tr><th>Script</th><th>Purpose</th></tr>
+  <tr><td><code>cli.ts</code></td><td>Dev session CLI</td></tr>
+  <tr><td><code>admin-cli.ts</code></td><td>Internal admin ops</td></tr>
+  <tr><td><code>preflight.ts</code></td><td>Production env gate</td></tr>
+  <tr><td><code>backup-pg.sh</code> / <code>restore-pg.sh</code></td><td>Encrypted dump ↔ restore</td></tr>
+  <tr><td><code>seed.ts</code></td><td>Local seed account</td></tr>
+  <tr><td><code>smoke-prod.ts</code></td><td>Prod-shaped smoke</td></tr>
+  <tr><td><code>rate-limit-probe.ps1</code></td><td>Live rate-limit probe</td></tr>
+  <tr><td><code>ram-probe.ts</code></td><td>Session RAM estimate</td></tr>
+</table>
+
+<h2>10. deploy/</h2>
+<ul>
+  <li><code>nginx.conf</code> — TLS with Cloudflare Origin CA paths; CF IP <code>real_ip</code>; proxy <code>/api</code> → API, <code>/</code> → dashboard</li>
+  <li><code>logrotate.waapi.conf</code> — sample for nginx + <code>/var/log/waapi</code></li>
+</ul>
+
+<h2>11. Cross-cutting concerns</h2>
+<h3>11.1 Security</h3>
+<ul>
+  <li>Argon2id passwords; hashed tokens; AES-GCM auth state &amp; outbox payloads</li>
+  <li>Turnstile on auth forms; rate limits (IP / failed auth / account / route)</li>
+  <li>Webhook URL SSRF checks; signed outbound deliveries</li>
+  <li>Gitleaks in CI; preflight rejects placeholders and <code>EMAIL_DRIVER=console</code> in prod</li>
+</ul>
+<h3>11.2 Multi-tenancy</h3>
+<ul>
+  <li>All session/message/webhook queries scoped by <code>account_id</code></li>
+  <li>Cross-account access → 404 (or 403 where policy says so)</li>
+  <li>Tests: <code>phase-2.integration.test.ts</code>, <code>session-ux</code>, <code>worker/.../tenant-isolation.test.ts</code></li>
+</ul>
+<h3>11.3 Privacy logging rule</h3>
+<p>Do not put secrets, refresh tokens, PAT/session keys, or message bodies in logs or plaintext DB columns meant for ops. Encrypted blobs are OK; audit meta must stay metadata-only.</p>
+
+<h2>12. Test map (selected)</h2>
+<table>
+  <tr><th>File</th><th>Covers</th></tr>
+  <tr><td><code>phase-2-round3.integration.test.ts</code></td><td>Route matrix (no 5xx)</td></tr>
+  <tr><td><code>invite-gate.integration.test.ts</code></td><td>WP-B signup modes</td></tr>
+  <tr><td><code>terms-acceptance.integration.test.ts</code></td><td>WP-J terms</td></tr>
+  <tr><td><code>billing.integration.test.ts</code> + state-machine / webhook-replay</td><td>WP-F</td></tr>
+  <tr><td><code>admin-ops.integration.test.ts</code></td><td>WP-G</td></tr>
+  <tr><td><code>account-lifecycle.integration.test.ts</code></td><td>WP-D</td></tr>
+  <tr><td><code>session-ux.integration.test.ts</code></td><td>WP-E</td></tr>
+  <tr><td><code>auth-cookies.integration.test.ts</code></td><td>CSRF / cookies</td></tr>
+  <tr><td><code>apps/site/build.test.ts</code></td><td>Static site build</td></tr>
+  <tr><td><code>scripts/preflight.test.ts</code></td><td>WP-L preflight</td></tr>
+  <tr><td><code>wa-client.contract.test.ts</code></td><td>Fake ↔ real driver contract</td></tr>
+</table>
+
+<h2>13. Config entry points</h2>
+<ul>
+  <li>API: <code>apps/api/src/config.ts</code> (<code>validateConfigEnv</code>)</li>
+  <li>Worker: <code>apps/worker/src/config.ts</code></li>
+  <li>Example env: <code>.env.example</code></li>
+  <li>CI env: <code>.github/workflows/ci.yml</code></li>
+</ul>
+
+<h2>14. Suggested reading order (for Claude / new engineers)</h2>
+<ol>
+  <li><code>README.md</code> → <code>docs/runbook.md</code></li>
+  <li><code>packages/shared/src/plans.ts</code> + <code>schemas/auth.ts</code></li>
+  <li><code>packages/db/src/schema.ts</code> + drizzle journal</li>
+  <li><code>apps/api/src/app.ts</code> → <code>routes/v1/*</code> → <code>services/*</code></li>
+  <li><code>apps/worker/src/baileys/types.ts</code> → <code>session/manager.ts</code></li>
+  <li><code>docs/design/billing.md</code></li>
+  <li>This PDF + Project Report PDF</li>
+</ol>
+
+<div class="footer-note">
+  Source paths are relative to the waapi repo root. Generated without embedding secrets.
+  For behavioral status and gaps, see the Project Report PDF.
+</div>
+
+</body>
+</html>

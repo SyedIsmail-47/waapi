@@ -106,8 +106,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   if (parsed.data.NODE_ENV === "production") {
     rejectPlaceholder("AUTH_STATE_ENCRYPTION_KEY", parsed.data.AUTH_STATE_ENCRYPTION_KEY);
     rejectPlaceholder("PAYLOAD_ENCRYPTION_KEY", parsed.data.PAYLOAD_ENCRYPTION_KEY);
-    if (parsed.data.WA_DRIVER === "fake" && env.SMOKE_MODE !== "true" && env.SMOKE_MODE !== "1") {
-      throw new Error("WA_DRIVER=fake is forbidden in production unless SMOKE_MODE=true");
+    if (env.SMOKE_MODE === "true" || env.SMOKE_MODE === "1") {
+      throw new Error("SMOKE_MODE must be false in production (use NODE_ENV=test for local smoke)");
+    }
+    if (parsed.data.WA_DRIVER === "fake") {
+      throw new Error("WA_DRIVER=fake is forbidden in production");
     }
   }
   const keyRing = buildKeyRing({

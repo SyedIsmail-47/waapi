@@ -125,13 +125,14 @@ const envSchema = z.object({
   COOKIE_SECURE: bool(false),
   /** Cloudflare Turnstile secret; required when TURNSTILE_DISABLED=false. */
   TURNSTILE_SECRET_KEY: z.string().optional(),
-  /** Skip Turnstile verification (tests/smoke). Forbidden in production unless SMOKE_MODE. */
+  /** Skip Turnstile verification (tests only). Forbidden in production. */
   TURNSTILE_DISABLED: bool(false),
   /**
-   * Allows COOKIE_SECURE=false and TURNSTILE_DISABLED=true under NODE_ENV=production
-   * for the local smoke stack only. Never set on a real customer host.
+   * Local smoke compose only. Forbidden when NODE_ENV=production (use NODE_ENV=test for smoke).
    */
   SMOKE_MODE: bool(false),
+  /** Worker/API note — fake driver forbidden in production. */
+  WA_DRIVER: z.enum(["baileys", "fake"]).optional(),
   /**
    * Signup gate: open (anyone), invite (single-use code required), closed (403).
    * Default invite for closed beta. Tests/smoke typically set open.
@@ -169,11 +170,23 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rejectPlaceholder("ADMIN_API_SECRET", parsed.ADMIN_API_SECRET);
     rejectPlaceholder("WEBHOOK_SECRET_KEY", parsed.WEBHOOK_SECRET_KEY);
     rejectPlaceholder("PAYLOAD_ENCRYPTION_KEY", parsed.PAYLOAD_ENCRYPTION_KEY);
-    if (parsed.DEV_RETURN_TOKENS && !parsed.SMOKE_MODE) {
+    if (parsed.SMOKE_MODE) {
+      throw new Error("SMOKE_MODE must be false in production (use NODE_ENV=test for local smoke)");
+    }
+    if (parsed.WA_DRIVER === "fake") {
+      throw new Error("WA_DRIVER=fake is forbidden in production");
+    }
+    if (parsed.DEV_RETURN_TOKENS) {
       throw new Error("DEV_RETURN_TOKENS must be false in production");
     }
     if (parsed.ALLOW_HTTP_WEBHOOKS) {
       throw new Error("ALLOW_HTTP_WEBHOOKS must be false in production");
+    }
+    if (parsed.TURNSTILE_DISABLED) {
+      throw new Error("TURNSTILE_DISABLED must be false in production");
+    }
+    if (!parsed.TURNSTILE_SECRET_KEY?.trim()) {
+      throw new Error("TURNSTILE_SECRET_KEY is required in production");
     }
     if (parsed.ENABLE_DOCS && !parsed.ALLOW_DOCS_IN_PROD) {
       throw new Error("ENABLE_DOCS requires ALLOW_DOCS_IN_PROD=true in production");
@@ -190,21 +203,10 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (parsed.EMAIL_DRIVER === "smtp" && !parsed.SMTP_URL) {
       throw new Error("SMTP_URL is required when EMAIL_DRIVER=smtp");
     }
-    if (!parsed.SMOKE_MODE) {
-      if (parsed.TURNSTILE_DISABLED) {
-        throw new Error("TURNSTILE_DISABLED must be false in production");
-      }
-      if (!parsed.TURNSTILE_SECRET_KEY?.trim()) {
-        throw new Error("TURNSTILE_SECRET_KEY is required in production");
-      }
-    }
   }
   globalMax ??= 100;
 
-  const cookieSecure =
-    parsed.NODE_ENV === "production" && !parsed.SMOKE_MODE
-      ? true
-      : parsed.COOKIE_SECURE;
+  const cookieSecure = parsed.NODE_ENV === "production" ? true : parsed.COOKIE_SECURE;
 
   const publicAppUrl =
     parsed.PUBLIC_APP_URL?.replace(/\/+$/, "") ??
@@ -221,11 +223,7 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       throw new Error("PADDLE_PRICE_IDS_JSON must be valid JSON object");
     }
   }
-  if (
-    parsed.BILLING_PROVIDER === "paddle" &&
-    parsed.NODE_ENV === "production" &&
-    !parsed.SMOKE_MODE
-  ) {
+  if (parsed.BILLING_PROVIDER === "paddle" && parsed.NODE_ENV === "production") {
     if (!parsed.PADDLE_API_KEY?.trim() || !parsed.PADDLE_WEBHOOK_SECRET?.trim()) {
       throw new Error(
         "Paddle billing requires PADDLE_API_KEY and PADDLE_WEBHOOK_SECRET in production",
