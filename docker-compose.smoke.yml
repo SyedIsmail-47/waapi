@@ -32,3 +32,9 @@ services:
     depends_on:
       mailpit:
         condition: service_started
+
+  worker:
+    environment:
+      SMOKE_MODE: "true"
+      WA_DRIVER: fake
+      FAKE_QR_DELAY_MS: "30"

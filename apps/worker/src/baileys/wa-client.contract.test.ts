@@ -18,7 +18,7 @@ async function waitFor(
   }
 }
 
-function createUnderTest(opts?: FakeClientOptions): Promise<WAClient> {
+function createUnderTest(opts?: Partial<FakeClientOptions>): Promise<WAClient> {
   return createFakeClient({
     sessionId: "11111111-1111-4111-8111-111111111111",
     accountId: "22222222-2222-4222-8222-222222222222",
