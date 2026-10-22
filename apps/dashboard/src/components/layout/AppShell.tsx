@@ -7,6 +7,7 @@ const links = [
   { to: "/sessions", label: "Sessions" },
   { to: "/messages", label: "Messages" },
   { to: "/settings", label: "Settings" },
+  { to: "/settings/billing", label: "Billing" },
   { to: "/settings/tokens", label: "API tokens" },
 ];
 

@@ -51,7 +51,7 @@ describe("Phase 2 round 3", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: label },
+      payload: { email, password, name: label, acceptTerms: true },
     });
     expect(registered.statusCode).toBe(201);
     const body = registered.json<{
@@ -369,6 +369,14 @@ describe("Phase 2 round 3", () => {
       }
       if (url.includes("/signup-config")) {
         return 200;
+      }
+      if (url.includes("/billing/webhooks")) {
+        return [400, 401, 404];
+      }
+      if (url.startsWith("/api/v1/billing")) {
+        if (mode === "none") return 401;
+        if (mode === "jwt") return [200, 400, 404];
+        return 403;
       }
       if (url.startsWith("/api/v1/auth/register") || url.includes("/login") ||
           url.includes("/refresh") || url.includes("/verify-email") ||

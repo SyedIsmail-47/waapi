@@ -145,6 +145,9 @@ export async function register(
     }
     throw err;
   }
+  const { ensureSubscription } = await import("./billing/index.js");
+  await ensureSubscription(database, result.account.id);
+
   await emailQueue.add(
     "verify-email",
     {

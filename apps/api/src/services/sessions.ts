@@ -22,6 +22,9 @@ export async function createSession(
   name: string,
   requestId: string,
 ) {
+  const { assertBillingAllowsUse } = await import("./billing/index.js");
+  await assertBillingAllowsUse(database, accountId);
+
   const session = await database.db.transaction(async (tx) => {
     await tx.execute(sql`select id from accounts where id = ${accountId} for update`);
     await tx.execute(sql`select pg_advisory_xact_lock(${GLOBAL_SESSION_LOCK})`);

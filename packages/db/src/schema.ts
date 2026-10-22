@@ -226,6 +226,54 @@ export const securityAuditLog = pgTable(
   }),
 );
 
+export const SUBSCRIPTION_STATUSES = [
+  "trialing",
+  "active",
+  "past_due",
+  "canceled",
+  "expired",
+] as const;
+
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    planCode: text("plan_code").notNull().default("trial"),
+    status: text("status", { enum: SUBSCRIPTION_STATUSES }).notNull().default("trialing"),
+    trialEndsAt: timestamp("trial_ends_at", { withTimezone: true }),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    graceUntil: timestamp("grace_until", { withTimezone: true }),
+    provider: text("provider").notNull().default("manual"),
+    providerCustomerId: text("provider_customer_id"),
+    providerSubscriptionId: text("provider_subscription_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountUidx: uniqueIndex("subscriptions_account_id_uidx").on(t.accountId),
+  }),
+);
+
+export const billingEvents = pgTable(
+  "billing_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    provider: text("provider").notNull(),
+    eventId: text("event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    accountId: uuid("account_id").references(() => accounts.id, { onDelete: "set null" }),
+    processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    providerEventUidx: uniqueIndex("billing_events_provider_event_uidx").on(t.provider, t.eventId),
+  }),
+);
+
 /** Single-use closed-beta invite codes (plaintext returned once at creation; only hash stored). */
 export const inviteCodes = pgTable(
   "invite_codes",

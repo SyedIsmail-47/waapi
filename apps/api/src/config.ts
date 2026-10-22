@@ -139,11 +139,19 @@ const envSchema = z.object({
   SIGNUPS_MODE: z.enum(["open", "invite", "closed"]).default("invite"),
   /** Seconds a just-rotated refresh may be reused without family revoke. */
   REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().positive().default(10),
+  TRIAL_DAYS: z.coerce.number().int().min(0).max(90).default(3),
+  BILLING_GRACE_DAYS: z.coerce.number().int().min(0).max(30).default(3),
+  BILLING_PROVIDER: z.enum(["manual", "paddle"]).default("manual"),
+  PADDLE_API_KEY: z.string().optional(),
+  PADDLE_WEBHOOK_SECRET: z.string().optional(),
+  PADDLE_ENV: z.enum(["sandbox", "production"]).default("sandbox"),
+  PADDLE_PRICE_IDS_JSON: z.string().optional(),
 });
 
 export type Config = z.infer<typeof envSchema> & {
   GLOBAL_MAX_SESSIONS: number;
   PUBLIC_APP_URL: string;
+  PADDLE_PRICE_IDS: Record<string, string>;
   brand: ReturnType<typeof getBrandTokens>;
 };
 
@@ -205,11 +213,32 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("PUBLIC_APP_URL is required in production");
   }
 
+  let paddlePriceIds: Record<string, string> = {};
+  if (parsed.PADDLE_PRICE_IDS_JSON?.trim()) {
+    try {
+      paddlePriceIds = JSON.parse(parsed.PADDLE_PRICE_IDS_JSON) as Record<string, string>;
+    } catch {
+      throw new Error("PADDLE_PRICE_IDS_JSON must be valid JSON object");
+    }
+  }
+  if (
+    parsed.BILLING_PROVIDER === "paddle" &&
+    parsed.NODE_ENV === "production" &&
+    !parsed.SMOKE_MODE
+  ) {
+    if (!parsed.PADDLE_API_KEY?.trim() || !parsed.PADDLE_WEBHOOK_SECRET?.trim()) {
+      throw new Error(
+        "Paddle billing requires PADDLE_API_KEY and PADDLE_WEBHOOK_SECRET in production",
+      );
+    }
+  }
+
   return {
     ...parsed,
     PUBLIC_APP_URL: publicAppUrl,
     COOKIE_SECURE: cookieSecure,
     GLOBAL_MAX_SESSIONS: globalMax,
+    PADDLE_PRICE_IDS: paddlePriceIds,
     brand: getBrandTokens(parsed.BRAND_NAME),
   };
 }
