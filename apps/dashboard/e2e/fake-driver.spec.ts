@@ -48,7 +48,7 @@ test.describe("fake driver closed-beta path", () => {
       timeout: 15_000,
     });
     await page.getByRole("link", { name: "fake-e2e" }).click();
-    await page.getByRole("button", { name: /Connect/i }).click();
+    await page.getByRole("button", { name: "Connect / show QR" }).click();
     await expect(page.getByText(/Ban risk/i)).toBeVisible();
 
     // Use API login for bearer (browser cookie jar is separate from this request context).
