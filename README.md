@@ -1,56 +1,55 @@
-# Monorepo
+# wapidapi (waapi monorepo)
 
-Commercial multi-tenant WhatsApp API SaaS (unofficial, Baileys-based). Brand name is driven by `BRAND_NAME` (see `.env.example` and `@waapi/shared`).
+Commercial multi-tenant WhatsApp HTTP API (unofficial, Baileys-based).  
+Display brand is driven by `BRAND_NAME` (production brand: **wapidapi**).
+
+**Status:** Phases 1–4 Tier-1 complete on [`main`](https://github.com/SyedIsmail-47/waapi).  
+**Start here:** [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) — full system + process guide.
 
 ## Stack
 
-- `apps/api` — Fastify `/api/v1` (auth, sessions, send, webhooks)
-- `apps/worker` — Baileys session manager
-- `apps/dashboard` — React + Vite + Tailwind + shadcn (Phase 3)
-- `packages/shared` — types, zod schemas, brand helper
-- Postgres + Redis via Docker Compose
+| Path | Role |
+|------|------|
+| `apps/api` | Fastify `/api/v1` + internal admin |
+| `apps/worker` | Baileys / fake session worker |
+| `apps/dashboard` | React + Vite operator UI |
+| `apps/site` | Static marketing + legal |
+| `packages/db` | Drizzle + migrations |
+| `packages/shared` | Zod, plans, brand, errors |
 
-## Prerequisites
-
-- Node.js 22+
-- pnpm 9.15
-- Docker Desktop (Windows)
-
-## Quick start
+## Quick start (local)
 
 ```bash
-cp .env.example .env
-# set secrets from .env.example comments
+cp .env.example .env   # fill secrets from comments
 pnpm install
 pnpm docker:up
-pnpm db:migrate
-pnpm seed
-pnpm dev:api          # terminal 1
-pnpm dev:worker       # terminal 2
-pnpm dev:dashboard    # terminal 3 — http://127.0.0.1:5173 (proxies /api)
+pnpm db:migrate && pnpm seed
+pnpm dev:api
+pnpm dev:worker
+pnpm dev:dashboard     # http://127.0.0.1:5173
 ```
 
-Production-shaped stack (API + worker + dashboard nginx same-origin):
+Production-shaped compose: `pnpm docker:up:prod` → http://127.0.0.1:8080
 
-```bash
-pnpm docker:up:prod
-# dashboard: http://127.0.0.1:8080  (proxies /api to api:3000)
-```
+## Documentation
 
-## Scripts
+| Doc | Purpose |
+|-----|---------|
+| [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | **Complete developer / system guide** |
+| [docs/runbook.md](docs/runbook.md) | Ops, smoke, admin, Paddle, RAM, acceptance |
+| [docs/reports/waapi-project-report.pdf](docs/reports/waapi-project-report.pdf) | Project status report |
+| [docs/reports/waapi-source-code-documentation.pdf](docs/reports/waapi-source-code-documentation.pdf) | Source map |
+| [docs/design/billing.md](docs/design/billing.md) | Billing design |
 
-All scripts are cross-platform (`tsx` / `node`). No bash-only package scripts.
+## CI
 
-Dashboard component tests: `pnpm --filter @waapi/dashboard test`  
-Playwright e2e (smoke stack): see [docs/runbook.md](docs/runbook.md).
+GitHub Actions on push/PR: **gitleaks**, **build** (lint/typecheck/test), **e2e (smoke + playwright)**.
 
-## Status
+## Deploy
 
-Phases 1–2 (worker + API) and Phase 3 (dashboard) are implemented. Billing/admin/media are out of scope.
+Target: Hostinger VPS behind Cloudflare (`app` subdomain). Edge: [deploy/nginx.conf](deploy/nginx.conf).  
+Step-by-step process is in the developer guide §9 and the runbook. **Never commit `.env` or live secrets.**
 
-See [docs/runbook.md](docs/runbook.md) for ops, smoke, and acceptance checks.
+## Disclaimer
 
-## Deploy notes
-
-Target: Hostinger VPS behind Cloudflare. Edge nginx ([deploy/nginx.conf](deploy/nginx.conf)) terminates TLS and routes `/api` + `/health` to the API and `/` to the dashboard container so the browser stays same-origin (CORS closed).
-
+Unofficial client. Not affiliated with WhatsApp or Meta. Account ban risk applies.

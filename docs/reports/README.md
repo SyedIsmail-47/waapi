@@ -1,5 +1,7 @@
 # Engineering reports
 
+**Also read:** [../DEVELOPER_GUIDE.md](../DEVELOPER_GUIDE.md) (full system + deploy process).
+
 | Document | HTML | PDF |
 |----------|------|-----|
 | **Project report** — status, WPs, architecture, gaps | [waapi-project-report.html](./waapi-project-report.html) | [waapi-project-report.pdf](./waapi-project-report.pdf) |
