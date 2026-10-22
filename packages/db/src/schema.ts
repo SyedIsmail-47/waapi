@@ -393,12 +393,20 @@ export const webhookOutbox = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     eventType: text("event_type", { enum: WEBHOOK_EVENT_TYPES }).notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    /** Encrypted envelope; null after dead-letter purge of body. */
+    payload: jsonb("payload").$type<Record<string, unknown> | null>(),
+    status: text("status", { enum: ["pending", "dead"] })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     unprocessedIdx: index("webhook_outbox_unprocessed_idx").on(t.processedAt, t.createdAt),
+    claimIdx: index("webhook_outbox_claim_idx").on(t.status, t.nextAttemptAt, t.createdAt),
   }),
 );
 

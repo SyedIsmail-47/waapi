@@ -77,11 +77,25 @@ export async function purgeRetentionTables(database: Db): Promise<Record<string,
     (outboxProcessed[0] as { n: number } | undefined)?.n ?? 0,
   );
 
-  // Unprocessed outbox (encrypted) older than 24h — drop to bound retention.
+  // Dead-letter outbox rows (payload already cleared): keep metadata 7 days.
+  const outboxDead = await database.db.execute(sql`
+    with d as (
+      delete from webhook_outbox
+      where status = 'dead'
+        and created_at < now() - interval '7 days'
+      returning 1
+    )
+    select count(*)::int as n from d
+  `);
+  counts.webhook_outbox_dead = Number((outboxDead[0] as { n: number } | undefined)?.n ?? 0);
+
+  // Abandoned pending with zero attempts older than 24h (not retrying poison).
   const outboxStale = await database.db.execute(sql`
     with d as (
       delete from webhook_outbox
-      where processed_at is null
+      where status = 'pending'
+        and processed_at is null
+        and attempts = 0
         and created_at < now() - interval '24 hours'
       returning 1
     )

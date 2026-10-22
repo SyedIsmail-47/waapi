@@ -10,13 +10,22 @@ import {
 } from "@waapi/shared";
 import { z } from "zod";
 import { isDevTokenReturnEnabled } from "../../config.js";
+import {
+  assertCsrfForCookieMode,
+  clearAuthCookies,
+  readRefreshFromRequest,
+  setAuthCookies,
+} from "../../lib/auth-cookies.js";
 import { authRateLimitConfig } from "../../lib/auth-rate-limit.js";
 import { clientIp } from "../../lib/client-ip.js";
+import { assertTurnstile } from "../../lib/turnstile.js";
 import { createPat, listPats, revokePat } from "../../services/tokens.js";
 import {
   forgotPassword,
+  getMe,
   login,
   logoutAll,
+  logoutRefresh,
   register,
   resendVerification,
   resetPassword,
@@ -31,9 +40,11 @@ const routes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/register", authRateLimitConfig("register"), async (request, reply) => {
+    const input = registerBodySchema.parse(request.body);
+    await assertTurnstile(input.turnstileToken, clientIp(request));
     const result = await register(
       app.database,
-      registerBodySchema.parse(request.body),
+      { email: input.email, password: input.password, name: input.name },
       clientIp(request),
     );
     const body: {
@@ -50,19 +61,39 @@ const routes: FastifyPluginAsync = async (app) => {
     return reply.code(201).send(body);
   });
 
-  app.post("/login", authRateLimitConfig("login"), async (request) => {
+  app.post("/login", authRateLimitConfig("login"), async (request, reply) => {
     const input = loginBodySchema.parse(request.body);
+    await assertTurnstile(input.turnstileToken, clientIp(request));
     const result = await login(app.database, input.email, input.password, clientIp(request));
-    return tokens(result.identity, result.refreshToken);
+    const body = tokens(result.identity, result.refreshToken);
+    setAuthCookies(reply, result.refreshToken);
+    return body;
   });
 
-  app.post("/refresh", authRateLimitConfig("refresh"), async (request) => {
-    const result = await rotateRefresh(
-      app.database,
-      refreshBodySchema.parse(request.body).refreshToken,
-      clientIp(request),
-    );
-    return tokens(result.identity, result.refreshToken);
+  app.post("/refresh", authRateLimitConfig("refresh"), async (request, reply) => {
+    refreshBodySchema.parse(request.body ?? {});
+    assertCsrfForCookieMode(request);
+    const refreshToken = readRefreshFromRequest(request);
+    if (!refreshToken) {
+      throw Object.assign(new Error("Refresh token required"), {
+        statusCode: 401,
+        code: "UNAUTHORIZED",
+      });
+    }
+    const result = await rotateRefresh(app.database, refreshToken, clientIp(request));
+    const body = tokens(result.identity, result.refreshToken);
+    setAuthCookies(reply, result.refreshToken);
+    return body;
+  });
+
+  app.post("/logout", authRateLimitConfig("refresh"), async (request, reply) => {
+    assertCsrfForCookieMode(request);
+    const refreshToken = readRefreshFromRequest(request);
+    if (refreshToken) {
+      await logoutRefresh(app.database, refreshToken);
+    }
+    clearAuthCookies(reply);
+    return reply.code(204).send();
   });
 
   app.post("/verify-email", authRateLimitConfig("verify-email"), async (request, reply) => {
@@ -81,7 +112,9 @@ const routes: FastifyPluginAsync = async (app) => {
   );
 
   app.post("/forgot-password", authRateLimitConfig("forgot-password"), async (request, reply) => {
-    await forgotPassword(app.database, forgotPasswordBodySchema.parse(request.body).email);
+    const input = forgotPasswordBodySchema.parse(request.body);
+    await assertTurnstile(input.turnstileToken, clientIp(request));
+    await forgotPassword(app.database, input.email);
     return reply.code(202).send();
   });
 
@@ -91,11 +124,16 @@ const routes: FastifyPluginAsync = async (app) => {
     return reply.code(204).send();
   });
 
+  app.get("/me", { preHandler: app.requireAuthType("jwt") }, async (request) =>
+    getMe(app.database, request.identity.userId),
+  );
+
   app.post(
     "/logout-all",
     { preHandler: app.requireAuthType("jwt") },
     async (request, reply) => {
       await logoutAll(app.database, request.identity.userId);
+      clearAuthCookies(reply);
       return reply.code(204).send();
     },
   );
@@ -131,4 +169,5 @@ const routes: FastifyPluginAsync = async (app) => {
     },
   );
 };
+
 export default routes;

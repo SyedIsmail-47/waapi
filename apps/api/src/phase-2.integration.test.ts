@@ -20,11 +20,13 @@ const ACCOUNT_SCOPED_ROUTE_PATTERNS = [
   { method: "POST", url: "/api/v1/sessions/:id/disconnect" },
   { method: "POST", url: "/api/v1/sessions/:id/logout" },
   { method: "POST", url: "/api/v1/sessions/:id/keys" },
+  { method: "GET", url: "/api/v1/sessions/:id/keys" },
   { method: "DELETE", url: "/api/v1/sessions/:id/keys/:keyId" },
   { method: "PUT", url: "/api/v1/sessions/:id/webhook" },
   { method: "GET", url: "/api/v1/sessions/:id/webhook" },
   { method: "DELETE", url: "/api/v1/sessions/:id/webhook" },
   { method: "POST", url: "/api/v1/sessions/:id/webhook/test" },
+  { method: "GET", url: "/api/v1/sessions/:id/webhook/deliveries" },
   { method: "POST", url: "/api/v1/sessions/:id/webhook/deliveries/:deliveryId/replay" },
   { method: "POST", url: "/api/v1/send-message" },
 ];
@@ -163,7 +165,9 @@ describe("Phase 2 API integration", () => {
     process.env.DEV_RETURN_TOKENS = "true";
   });
 
-  it("registers, rotates refresh, revokes family on reuse, logout-all", async () => {
+  it("registers, rotates refresh, revokes family on reuse after grace, logout-all", async () => {
+    const { createHash } = await import("node:crypto");
+    const { redis } = await import("./services/queues.js");
     const auth = await registerVerifyLogin("auth-flow");
     const rotated = await app.inject({
       method: "POST",
@@ -173,6 +177,19 @@ describe("Phase 2 API integration", () => {
     expect(rotated.statusCode).toBe(200);
     const rotatedTokens = rotated.json<{ accessToken: string; refreshToken: string }>();
     expect(rotatedTokens.refreshToken).not.toBe(auth.refreshToken);
+
+    const graceReuse = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/refresh",
+      payload: { refreshToken: auth.refreshToken },
+    });
+    expect(graceReuse.statusCode).toBe(200);
+    expect(graceReuse.json<{ refreshToken: string }>().refreshToken).toBe(
+      rotatedTokens.refreshToken,
+    );
+
+    const oldHash = createHash("sha256").update(auth.refreshToken).digest("hex");
+    await redis.del(`refresh:grace:${oldHash}`);
 
     const reuse = await app.inject({
       method: "POST",
@@ -210,7 +227,7 @@ describe("Phase 2 API integration", () => {
     expect(rejected.statusCode).toBe(401);
   });
 
-  it("allows exactly one success for concurrent refresh of the same token", async () => {
+  it("concurrent refresh of the same token converges via grace (no family kill)", async () => {
     const auth = await registerVerifyLogin("refresh-race");
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
@@ -221,8 +238,14 @@ describe("Phase 2 API integration", () => {
         }),
       ),
     );
-    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
-    expect(results.filter((r) => r.statusCode === 401).length).toBeGreaterThanOrEqual(7);
+    const ok = results.filter((r) => r.statusCode === 200);
+    expect(ok.length).toBeGreaterThanOrEqual(1);
+    expect(results.every((r) => r.statusCode === 200 || r.statusCode === 401)).toBe(true);
+    const tokens = new Set(
+      ok.map((r) => r.json<{ refreshToken: string }>().refreshToken),
+    );
+    // All successful responses share one successor (grace returns the same plaintext).
+    expect(tokens.size).toBe(1);
   });
 
   it("hides account A resources from account B with exactly 404", async () => {
@@ -259,6 +282,7 @@ describe("Phase 2 API integration", () => {
       { method: "POST", url: `/api/v1/sessions/${sessionId}/disconnect` },
       { method: "POST", url: `/api/v1/sessions/${sessionId}/logout` },
       { method: "DELETE", url: `/api/v1/sessions/${sessionId}` },
+      { method: "GET", url: `/api/v1/sessions/${sessionId}/keys` },
       { method: "POST", url: `/api/v1/sessions/${sessionId}/keys`, payload: { name: "x" } },
       { method: "DELETE", url: `/api/v1/sessions/${sessionId}/keys/${keyId}` },
       {
@@ -269,6 +293,7 @@ describe("Phase 2 API integration", () => {
       { method: "GET", url: `/api/v1/sessions/${sessionId}/webhook` },
       { method: "DELETE", url: `/api/v1/sessions/${sessionId}/webhook` },
       { method: "POST", url: `/api/v1/sessions/${sessionId}/webhook/test` },
+      { method: "GET", url: `/api/v1/sessions/${sessionId}/webhook/deliveries` },
       {
         method: "POST",
         url: "/api/v1/send-message",

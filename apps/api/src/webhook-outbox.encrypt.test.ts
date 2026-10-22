@@ -141,23 +141,26 @@ describe("API outbox poller encryption path", () => {
     );
     expect(JSON.parse(roundTrip).data.text).toBe(plainText);
 
+    // Other integration files may leave pending outbox rows in the shared DB;
+    // only assert this session's row was consumed and delivered.
     const n = await pollOutboxOnce(database);
-    expect(n).toBe(1);
+    expect(n).toBeGreaterThanOrEqual(1);
     expect(
       (
         await database.db.select().from(webhookOutbox).where(eq(webhookOutbox.id, outboxId))
       ).length,
     ).toBe(0);
 
-    const [delivery] = await database.db
+    const deliveries = await database.db
       .select()
       .from(webhookDeliveries)
-      .where(eq(webhookDeliveries.sessionId, session!.id))
-      .limit(1);
-    expect(isEncryptedPayload(delivery!.payload)).toBe(true);
-    expect(JSON.stringify(delivery!.payload)).not.toContain(plainText);
+      .where(eq(webhookDeliveries.sessionId, session!.id));
+    expect(deliveries.length).toBeGreaterThanOrEqual(1);
+    const delivery = deliveries[0]!;
+    expect(isEncryptedPayload(delivery.payload)).toBe(true);
+    expect(JSON.stringify(delivery.payload)).not.toContain(plainText);
 
-    const body = decryptPayloadJson(delivery!.payload as Record<string, unknown>, delivery!.id);
+    const body = decryptPayloadJson(delivery.payload as Record<string, unknown>, delivery.id);
     expect(JSON.parse(body).data.text).toBe(plainText);
 
     const { request: httpRequest } = await import("node:http");
@@ -183,7 +186,8 @@ describe("API outbox poller encryption path", () => {
     });
     expect(received.some((b) => b.includes(plainText))).toBe(true);
 
-    expect(await pollOutboxOnce(database)).toBe(0);
+    // Drain any remaining shared-DB outbox; our session must stay at one delivery.
+    await pollOutboxOnce(database);
     expect(
       (
         await database.db

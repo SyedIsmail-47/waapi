@@ -3,8 +3,13 @@ import jwt from "@fastify/jwt";
 import { eq, sql } from "drizzle-orm";
 import { personalAccessTokens, sessionApiKeys } from "@waapi/db";
 import { config } from "../config.js";
+import { clientIp } from "../lib/client-ip.js";
 import { sha256 } from "../lib/crypto.js";
-import { enforceAccountRateLimit } from "./rate-limit.js";
+import {
+  assertFailedAuthAllowed,
+  enforceAccountRateLimit,
+  recordFailedAuth,
+} from "./rate-limit.js";
 import type { Identity } from "../services/auth.js";
 
 export type AuthType = "jwt" | "pat" | "session_key";
@@ -55,11 +60,20 @@ export default fp(async (app) => {
   app.decorateRequest("identity", null as unknown as RequestIdentity);
 
   app.decorate("authenticate", async (request, _reply) => {
+    const ip = clientIp(request);
+    await assertFailedAuthAllowed(ip);
+
+    const fail = async (error: Error): Promise<never> => {
+      const status = (error as Error & { statusCode?: number }).statusCode;
+      if (status === 401) await recordFailedAuth(ip);
+      throw error;
+    };
+
     const header = request.headers.authorization;
     if (!header?.startsWith("Bearer ")) {
-      throw httpError("Bearer token required", 401, "UNAUTHORIZED");
+      await fail(httpError("Bearer token required", 401, "UNAUTHORIZED"));
     }
-    const token = header.slice(7);
+    const token = header!.slice(7);
     const brand = config.brand;
 
     const patPrefix = matchesPrefix(token, brand.patPrefix, brand.legacyPatPrefix);
@@ -91,26 +105,32 @@ export default fp(async (app) => {
           }
         | undefined;
       if (!row || row.user_disabled_at || row.account_suspended_at) {
-        throw httpError(row ? "Forbidden" : "Invalid token", row ? 403 : 401, row ? "FORBIDDEN" : "UNAUTHORIZED");
+        await fail(
+          httpError(
+            row ? "Forbidden" : "Invalid token",
+            row ? 403 : 401,
+            row ? "FORBIDDEN" : "UNAUTHORIZED",
+          ),
+        );
       }
       await touchLastUsed(
         () =>
           app.database.db
             .update(personalAccessTokens)
             .set({ lastUsedAt: new Date() })
-            .where(eq(personalAccessTokens.id, row.id)),
-        row.last_used_at,
+            .where(eq(personalAccessTokens.id, row!.id)),
+        row!.last_used_at,
       );
       request.identity = {
-        userId: row.user_id,
-        accountId: row.account_id,
-        role: row.role as Identity["role"],
-        isAdmin: row.is_admin,
+        userId: row!.user_id,
+        accountId: row!.account_id,
+        role: row!.role as Identity["role"],
+        isAdmin: row!.is_admin,
         authType: "pat",
         tokenHash: hash,
-        scopes: row.scopes ?? ["account"],
+        scopes: row!.scopes ?? ["account"],
       };
-      await enforceAccountRateLimit(row.account_id);
+      await enforceAccountRateLimit(row!.account_id);
       return;
     }
 
@@ -137,30 +157,42 @@ export default fp(async (app) => {
           }
         | undefined;
       if (!row || row.account_suspended_at) {
-        throw httpError(row ? "Forbidden" : "Invalid token", row ? 403 : 401, row ? "FORBIDDEN" : "UNAUTHORIZED");
+        await fail(
+          httpError(
+            row ? "Forbidden" : "Invalid token",
+            row ? 403 : 401,
+            row ? "FORBIDDEN" : "UNAUTHORIZED",
+          ),
+        );
       }
       await touchLastUsed(
         () =>
           app.database.db
             .update(sessionApiKeys)
             .set({ lastUsedAt: new Date() })
-            .where(eq(sessionApiKeys.id, row.id)),
-        row.last_used_at,
+            .where(eq(sessionApiKeys.id, row!.id)),
+        row!.last_used_at,
       );
       request.identity = {
-        userId: row.id,
-        accountId: row.account_id,
+        userId: row!.id,
+        accountId: row!.account_id,
         role: "member",
         isAdmin: false,
         authType: "session_key",
-        sessionId: row.session_id,
+        sessionId: row!.session_id,
         tokenHash: hash,
       };
-      await enforceAccountRateLimit(row.account_id);
+      await enforceAccountRateLimit(row!.account_id);
       return;
     }
 
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch (error) {
+      const err = error as Error & { statusCode?: number };
+      if (err.statusCode == null) err.statusCode = 401;
+      await fail(err);
+    }
     const payload = request.user as {
       userId: string;
       accountId: string;
@@ -187,17 +219,17 @@ export default fp(async (app) => {
         }
       | undefined;
     if (!row || row.disabled_at || row.suspended_at) {
-      throw httpError("Forbidden", 403, "FORBIDDEN");
+      await fail(httpError("Forbidden", 403, "FORBIDDEN"));
     }
     request.identity = {
-      userId: row.user_id,
-      accountId: row.account_id,
-      role: row.role,
-      isAdmin: row.is_admin,
+      userId: row!.user_id,
+      accountId: row!.account_id,
+      role: row!.role,
+      isAdmin: row!.is_admin,
       authType: "jwt",
       tokenHash: sha256(token),
     };
-    await enforceAccountRateLimit(row.account_id);
+    await enforceAccountRateLimit(row!.account_id);
   });
 
   app.decorate("requireAuthType", (...types: AuthType[]) => {

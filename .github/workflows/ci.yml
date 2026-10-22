@@ -7,6 +7,12 @@ on:
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
+    # pull_request scans call the Pulls API; without pull-requests:read the
+    # action fails with "Resource not accessible by integration" (403) and
+    # never runs the actual secret scan.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,6 +72,8 @@ jobs:
       ENABLE_DOCS: "false"
       GLOBAL_MAX_SESSIONS: "100"
       DEFAULT_ACCOUNT_MAX_SESSIONS: "1"
+      TURNSTILE_DISABLED: "true"
+      COOKIE_SECURE: "false"
 
     steps:
       - uses: actions/checkout@v4
@@ -79,5 +87,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: pnpm --filter @waapi/dashboard test
       - run: pnpm db:migrate
       - run: pnpm test

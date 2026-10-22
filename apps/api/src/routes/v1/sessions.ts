@@ -9,7 +9,7 @@ import {
   listSessions,
   status,
 } from "../../services/sessions.js";
-import { createSessionKey, revokeSessionKey } from "../../services/tokens.js";
+import { createSessionKey, listSessionKeys, revokeSessionKey } from "../../services/tokens.js";
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 
@@ -94,6 +94,14 @@ const routes: FastifyPluginAsync = async (app) => {
         ),
       );
   });
+
+  app.get<{ Params: { id: string } }>("/:id/keys", accountAuth, async (request) =>
+    listSessionKeys(
+      app.database,
+      request.identity.accountId,
+      paramsSchema.parse(request.params).id,
+    ),
+  );
 
   app.delete<{ Params: { id: string; keyId: string } }>(
     "/:id/keys/:keyId",

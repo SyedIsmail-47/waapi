@@ -22,7 +22,8 @@ process.env.DEV_RETURN_TOKENS ??= "true";
 process.env.ALLOW_HTTP_WEBHOOKS ??= "true";
 process.env.ENABLE_DOCS ??= "false";
 // Integration suites register many times from one IP; avoid .env prod-ish caps.
-process.env.RATE_LIMIT_MAX = "10000";
+process.env.RATE_LIMIT_IP_MAX = "10000";
+process.env.RATE_LIMIT_FAILED_AUTH_MAX = "10000";
 process.env.RATE_LIMIT_REGISTER = "10000";
 process.env.RATE_LIMIT_LOGIN = "10000";
 process.env.RATE_LIMIT_REFRESH = "10000";
@@ -35,3 +36,6 @@ process.env.RATE_LIMIT_ACCOUNT_MAX = "10000";
 process.env.GLOBAL_MAX_SESSIONS ??= "1000";
 process.env.DEFAULT_ACCOUNT_MAX_SESSIONS ??= "1";
 process.env.EMAIL_DRIVER ??= "console";
+process.env.TURNSTILE_DISABLED ??= "true";
+process.env.COOKIE_SECURE ??= "false";
+process.env.REFRESH_REUSE_GRACE_SECONDS ??= "10";

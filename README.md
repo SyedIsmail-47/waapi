@@ -4,15 +4,15 @@ Commercial multi-tenant WhatsApp API SaaS (unofficial, Baileys-based). Brand nam
 
 ## Stack
 
-- `apps/api` — Fastify API (Phase 2; stub in Phase 1)
+- `apps/api` — Fastify `/api/v1` (auth, sessions, send, webhooks)
 - `apps/worker` — Baileys session manager
-- `apps/dashboard` — React + Vite + Tailwind (Phase 3; stub in Phase 1)
+- `apps/dashboard` — React + Vite + Tailwind + shadcn (Phase 3)
 - `packages/shared` — types, zod schemas, brand helper
 - Postgres + Redis via Docker Compose
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - pnpm 9.15
 - Docker Desktop (Windows)
 
@@ -20,33 +20,37 @@ Commercial multi-tenant WhatsApp API SaaS (unofficial, Baileys-based). Brand nam
 
 ```bash
 cp .env.example .env
-# set AUTH_STATE_ENCRYPTION_KEY (32-byte base64)
+# set secrets from .env.example comments
 pnpm install
 pnpm docker:up
 pnpm db:migrate
 pnpm seed
-pnpm dev:worker
+pnpm dev:api          # terminal 1
+pnpm dev:worker       # terminal 2
+pnpm dev:dashboard    # terminal 3 — http://127.0.0.1:5173 (proxies /api)
 ```
 
-CLI (after session engine is implemented):
+Production-shaped stack (API + worker + dashboard nginx same-origin):
 
 ```bash
-pnpm cli -- create-session --name demo
-pnpm cli -- send --session <id> --to 1234567890 --text hello
-pnpm ram-probe
+pnpm docker:up:prod
+# dashboard: http://127.0.0.1:8080  (proxies /api to api:3000)
 ```
 
 ## Scripts
 
 All scripts are cross-platform (`tsx` / `node`). No bash-only package scripts.
 
-## Phase 1 status
+Dashboard component tests: `pnpm --filter @waapi/dashboard test`  
+Playwright e2e (smoke stack): see [docs/runbook.md](docs/runbook.md).
 
-Session engine is implemented in `apps/worker`. API and dashboard are stubs until later phases.
+## Status
 
-See [docs/runbook.md](docs/runbook.md) for acceptance checks, RAM probing, and the Phase 1 build summary.
+Phases 1–2 (worker + API) and Phase 3 (dashboard) are implemented. Billing/admin/media are out of scope.
+
+See [docs/runbook.md](docs/runbook.md) for ops, smoke, and acceptance checks.
 
 ## Deploy notes
 
-Target: Hostinger VPS behind Cloudflare. Reverse proxy (Caddy/Nginx) is documented for later ops; local Phase 1 uses Compose for Postgres/Redis only.
+Target: Hostinger VPS behind Cloudflare. Edge nginx ([deploy/nginx.conf](deploy/nginx.conf)) terminates TLS and routes `/api` + `/health` to the API and `/` to the dashboard container so the browser stays same-origin (CORS closed).
 

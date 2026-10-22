@@ -95,6 +95,33 @@ export async function createSessionKey(
   };
 }
 
+export async function listSessionKeys(database: Db, accountId: string, sessionId: string) {
+  const [session] = await database.db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountId, accountId)))
+    .limit(1);
+  if (!session) {
+    throw Object.assign(new Error("Session not found"), { statusCode: 404, code: "NOT_FOUND" });
+  }
+  return database.db
+    .select({
+      id: sessionApiKeys.id,
+      name: sessionApiKeys.name,
+      tokenPrefix: sessionApiKeys.tokenPrefix,
+      lastUsedAt: sessionApiKeys.lastUsedAt,
+      createdAt: sessionApiKeys.createdAt,
+    })
+    .from(sessionApiKeys)
+    .where(
+      and(
+        eq(sessionApiKeys.accountId, accountId),
+        eq(sessionApiKeys.sessionId, sessionId),
+        isNull(sessionApiKeys.revokedAt),
+      ),
+    );
+}
+
 export async function revokeSessionKey(
   database: Db,
   accountId: string,

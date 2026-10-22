@@ -208,6 +208,18 @@ function isDeadlock(err: unknown): boolean {
   return /deadlock detected/i.test(msg);
 }
 
+const graceKey = (tokenHash: string) => `refresh:grace:${tokenHash}`;
+
+async function storeRefreshGrace(oldHash: string, nextPlain: string): Promise<void> {
+  const { redis } = await import("./queues.js");
+  await redis.set(graceKey(oldHash), nextPlain, "EX", config.REFRESH_REUSE_GRACE_SECONDS);
+}
+
+async function readRefreshGrace(oldHash: string): Promise<string | null> {
+  const { redis } = await import("./queues.js");
+  return redis.get(graceKey(oldHash));
+}
+
 export async function rotateRefresh(database: Db, token: string, ip?: string) {
   const hash = sha256(token);
   const revokedError = () =>
@@ -275,10 +287,30 @@ export async function rotateRefresh(database: Db, token: string, ip?: string) {
             isAdmin: user.isAdmin,
           },
           refreshToken: nextToken,
+          oldHash: hash,
         };
       });
 
       if (outcome.kind === "reuse") {
+        const successor = await readRefreshGrace(hash);
+        if (successor) {
+          const [user] = await db(database)
+            .select()
+            .from(users)
+            .where(eq(users.id, outcome.userId))
+            .limit(1);
+          if (!user || user.disabledAt) throw revokedError();
+          return {
+            identity: {
+              userId: user.id,
+              accountId: user.accountId,
+              role: user.role,
+              isAdmin: user.isAdmin,
+            },
+            refreshToken: successor,
+            fromGrace: true as const,
+          };
+        }
         await db(database)
           .update(refreshTokens)
           .set({ revokedAt: new Date() })
@@ -295,6 +327,7 @@ export async function rotateRefresh(database: Db, token: string, ip?: string) {
       if (outcome.kind === "unauthorized") {
         throw Object.assign(new Error("User not found"), { statusCode: 401, code: "UNAUTHORIZED" });
       }
+      await storeRefreshGrace(outcome.oldHash, outcome.refreshToken);
       return { identity: outcome.identity, refreshToken: outcome.refreshToken };
     } catch (err) {
       if (isDeadlock(err) && attempt < 2) continue;
@@ -303,6 +336,47 @@ export async function rotateRefresh(database: Db, token: string, ip?: string) {
     }
   }
   throw revokedError();
+}
+
+export async function logoutRefresh(database: Db, token: string): Promise<void> {
+  const hash = sha256(token);
+  const [row] = await db(database)
+    .select()
+    .from(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, hash))
+    .limit(1);
+  if (!row) return;
+  await db(database)
+    .update(refreshTokens)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(refreshTokens.familyId, row.familyId), isNull(refreshTokens.revokedAt)));
+}
+
+export async function getMe(database: Db, userId: string) {
+  const [row] = await db(database)
+    .select({
+      userId: users.id,
+      accountId: users.accountId,
+      email: users.email,
+      emailVerifiedAt: users.emailVerifiedAt,
+      role: users.role,
+      accountName: accounts.name,
+    })
+    .from(users)
+    .innerJoin(accounts, eq(accounts.id, users.accountId))
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (!row) {
+    throw Object.assign(new Error("User not found"), { statusCode: 401, code: "UNAUTHORIZED" });
+  }
+  return {
+    userId: row.userId,
+    accountId: row.accountId,
+    email: row.email,
+    emailVerifiedAt: row.emailVerifiedAt?.toISOString() ?? null,
+    role: row.role,
+    accountName: row.accountName,
+  };
 }
 
 export async function logoutAll(database: Db, userId: string) {

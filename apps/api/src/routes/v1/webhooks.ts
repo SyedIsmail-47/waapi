@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   enqueueDelivery,
   getWebhook,
+  listDeliveries,
   removeWebhook,
   replayDelivery,
   testWebhook,
@@ -48,6 +49,25 @@ const routes: FastifyPluginAsync = async (app) => {
       );
       await enqueueDelivery(deliveryId);
       return reply.code(202).send({ deliveryId, queued: true });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/webhook/deliveries",
+    accountAuth,
+    async (request) => {
+      const query = z
+        .object({
+          cursor: z.string().min(1).max(256).optional(),
+          limit: z.coerce.number().int().min(1).max(100).optional(),
+        })
+        .parse(request.query);
+      return listDeliveries(
+        app.database,
+        request.identity.accountId,
+        params.parse(request.params).id,
+        query,
+      );
     },
   );
 

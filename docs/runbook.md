@@ -1,4 +1,4 @@
-# Runbook (Phase 1)
+# Runbook
 
 ## Local services
 
@@ -9,8 +9,28 @@ pnpm install
 pnpm docker:up
 pnpm db:migrate
 pnpm seed
+pnpm dev:api
 pnpm dev:worker
+pnpm dev:dashboard
 ```
+
+### Dashboard (Phase 3)
+
+- Dev: Vite on `http://127.0.0.1:5173` proxies `/api` and `/health` to the API (same-origin paths, CORS stays closed).
+- Prod compose: `dashboard` service on `127.0.0.1:8080` serves the SPA and proxies `/api` → `api:3000`.
+- Auth: access token in memory only; refresh in `HttpOnly; Secure; SameSite=Strict` cookie `Path=/api/v1/auth`; CSRF double-submit cookie + `X-CSRF-Token` on cookie-mode refresh/logout.
+- Turnstile: set `TURNSTILE_SECRET_KEY` + `VITE_TURNSTILE_SITE_KEY`. Tests/smoke use `TURNSTILE_DISABLED=true` (with `SMOKE_MODE=true` only for the smoke overlay).
+- Brand: `BRAND_NAME` / `VITE_BRAND_NAME` via `@waapi/shared` + `apps/dashboard/src/brand.ts`.
+
+### Playwright e2e against smoke stack
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile prod up -d --build
+pnpm --filter @waapi/dashboard exec playwright install chromium
+DASHBOARD_BASE_URL=http://127.0.0.1:8080 pnpm --filter @waapi/dashboard test:e2e
+```
+
+Playwright is local/smoke-oriented in Phase 3 (not required in CI yet).
 
 ### Email / production env
 

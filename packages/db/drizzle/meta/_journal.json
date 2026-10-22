@@ -50,6 +50,13 @@
       "when": 1792600000000,
       "tag": "0006_phase2_round4",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792700000000,
+      "tag": "0007_phase2_outbox_attempts",
+      "breakpoints": true
     }
   ]
 }
