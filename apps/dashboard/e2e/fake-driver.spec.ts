@@ -73,7 +73,7 @@ test.describe("fake driver closed-beta path", () => {
       `${internalBase}/internal/admin/fake/sessions/${session!.id}/scan`,
       {
         headers: { "x-admin-secret": adminSecret, "content-type": "application/json" },
-        data: { phoneNumber: "+15550009999" },
+        data: { phoneNumber: `+1555${String(Date.now()).slice(-7)}` },
       },
     );
     expect(scan.status()).toBe(202);
