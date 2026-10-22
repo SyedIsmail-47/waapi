@@ -69,6 +69,11 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   SMTP_URL: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
+  /**
+   * Absolute dashboard origin for email links (no trailing slash).
+   * Required in production. Defaults for local/test.
+   */
+  PUBLIC_APP_URL: z.string().url().optional(),
   WEBHOOK_SECRET_KEY: z.string().min(1),
   /** AES-GCM key for webhook_outbox payloads at rest (32 bytes base64|hex). */
   PAYLOAD_ENCRYPTION_KEY: z.string().min(1),
@@ -138,6 +143,7 @@ const envSchema = z.object({
 
 export type Config = z.infer<typeof envSchema> & {
   GLOBAL_MAX_SESSIONS: number;
+  PUBLIC_APP_URL: string;
   brand: ReturnType<typeof getBrandTokens>;
 };
 
@@ -164,6 +170,9 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (parsed.ENABLE_DOCS && !parsed.ALLOW_DOCS_IN_PROD) {
       throw new Error("ENABLE_DOCS requires ALLOW_DOCS_IN_PROD=true in production");
     }
+    if (!parsed.PUBLIC_APP_URL?.trim()) {
+      throw new Error("PUBLIC_APP_URL is required in production");
+    }
     if (parsed.EMAIL_DRIVER === "console") {
       throw new Error("EMAIL_DRIVER=console is forbidden in production; use resend or smtp");
     }
@@ -189,8 +198,16 @@ function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ? true
       : parsed.COOKIE_SECURE;
 
+  const publicAppUrl =
+    parsed.PUBLIC_APP_URL?.replace(/\/+$/, "") ??
+    (parsed.NODE_ENV === "production" ? "" : "http://127.0.0.1:5173");
+  if (!publicAppUrl) {
+    throw new Error("PUBLIC_APP_URL is required in production");
+  }
+
   return {
     ...parsed,
+    PUBLIC_APP_URL: publicAppUrl,
     COOKIE_SECURE: cookieSecure,
     GLOBAL_MAX_SESSIONS: globalMax,
     brand: getBrandTokens(parsed.BRAND_NAME),
@@ -216,6 +233,15 @@ export const getSignupsMode = (): "open" | "invite" | "closed" => {
   const raw = process.env.SIGNUPS_MODE ?? config.SIGNUPS_MODE;
   if (raw === "open" || raw === "invite" || raw === "closed") return raw;
   return config.SIGNUPS_MODE;
+};
+
+/** Absolute dashboard origin for email links (runtime override for tests). */
+export const getPublicAppUrl = (): string => {
+  const raw = (process.env.PUBLIC_APP_URL ?? config.PUBLIC_APP_URL ?? "").trim().replace(/\/+$/, "");
+  if (!raw) {
+    throw new Error("PUBLIC_APP_URL is not set");
+  }
+  return raw;
 };
 
 export const validateConfigEnv = loadConfig;

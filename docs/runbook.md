@@ -32,6 +32,10 @@ curl -sS -X POST "http://127.0.0.1:3001/internal/admin/invites" \
 
 Smoke overlay sets `SIGNUPS_MODE=open` so Playwright can register without invites.
 
+### Email links (Phase 4 WP-C)
+
+Set `PUBLIC_APP_URL` to the absolute dashboard origin (no trailing slash), e.g. `https://app.example.com`. Verify and reset emails include HTML + text with links to `/verify-email?token=…` and `/reset-password?token=…`. Brand text uses `BRAND_NAME`. Production refuses boot without `PUBLIC_APP_URL`.
+
 
 ### Playwright e2e against smoke stack
 

@@ -12,6 +12,7 @@ const base = {
   EMAIL_DRIVER: "resend",
   RESEND_API_KEY: "re_test_key",
   TURNSTILE_SECRET_KEY: "turnstile-test-secret",
+  PUBLIC_APP_URL: "https://app.example.test",
 };
 
 describe("production config guards", () => {
@@ -135,5 +136,21 @@ describe("production config guards", () => {
     expect(
       validateConfigEnv({ ...base, NODE_ENV: "test", SIGNUPS_MODE: "closed" }).SIGNUPS_MODE,
     ).toBe("closed");
+  });
+
+  it("requires PUBLIC_APP_URL in production", () => {
+    expect(() =>
+      validateConfigEnv({
+        ...base,
+        NODE_ENV: "production",
+        PUBLIC_APP_URL: undefined,
+      }),
+    ).toThrow(/PUBLIC_APP_URL/);
+  });
+
+  it("defaults PUBLIC_APP_URL outside production", () => {
+    const { PUBLIC_APP_URL: _drop, ...rest } = base;
+    const cfg = validateConfigEnv({ ...rest, NODE_ENV: "test" });
+    expect(cfg.PUBLIC_APP_URL).toMatch(/^http:\/\/127\.0\.0\.1:5173$/);
   });
 });
