@@ -49,6 +49,15 @@ export const createPatBodySchema = z.object({
   name: z.string().min(1).max(80),
 });
 
+export const changePasswordBodySchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(10).max(128),
+});
+
+export const deleteAccountBodySchema = z.object({
+  password: z.string().min(1).max(128),
+});
+
 export const memberRoleSchema = z.enum(MEMBER_ROLES);
 
 export const meResponseSchema = z.object({
