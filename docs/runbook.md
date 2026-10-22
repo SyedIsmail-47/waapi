@@ -15,6 +15,30 @@ pnpm dev:dashboard
 pnpm build:site   # prerendered marketing site -> apps/site/dist
 ```
 
+### Go-live prep (Phase 4 WP-L — no deploy from this repo)
+
+1. **Preflight** — fails if production env is missing, placeholder, wrong 32-byte key length, `EMAIL_DRIVER=console`, or `GLOBAL_MAX_SESSIONS` unset. Never prints secrets:
+
+```bash
+NODE_ENV=production pnpm preflight
+# or load .env.production then: pnpm preflight
+```
+
+2. **Encrypted backups** — `pg_dump` → gzip → AES-256-CBC (PBKDF2) to off-box storage:
+
+```bash
+export DATABASE_URL=...          # not echoed by the script
+export BACKUP_DEST=/mnt/offbox/waapi
+export BACKUP_PASSPHRASE_FILE=/root/.waapi-backup-pass
+./scripts/backup-pg.sh
+# Restore to staging only:
+./scripts/restore-pg.sh --input /mnt/offbox/waapi/waapi-....sql.gz.enc
+```
+
+3. **nginx + Cloudflare Origin CA** — `deploy/nginx.conf` expects `/etc/ssl/cloudflare/origin.pem` + `origin.key`. Firewall 443 to Cloudflare IPs only; set `TRUST_CLOUDFLARE=true` when the proxy is live.
+
+4. **Log rotation** — install `deploy/logrotate.waapi.conf` as `/etc/logrotate.d/waapi` (nginx + `/var/log/waapi/*.log`).
+
 ### Public site (Phase 4 WP-J)
 
 Static multi-page HTML + Tailwind (no SPA), output in `apps/site/dist` for Cloudflare Pages.
