@@ -1,8 +1,9 @@
 import { FormEvent, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { EmptyState, ErrorState, LoadingState } from "@/components/feedback/states";
 import { ShowOnceTokenDialog } from "@/components/keys/ShowOnceTokenDialog";
+import { ConfirmActionDialog } from "@/components/sessions/ConfirmActionDialog";
 import { QrModal } from "@/components/sessions/QrModal";
 import { StatusBadge } from "@/components/sessions/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -10,12 +11,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api, ApiError } from "@/lib/api-client";
+import { friendlySessionError } from "@/lib/friendly-errors";
 
 type Session = {
   id: string;
   name: string;
   status: string;
   phoneNumber: string | null;
+  lastError: string | null;
 };
 
 type KeyRow = {
@@ -44,10 +47,15 @@ type Delivery = {
 
 export function SessionDetailPage() {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [qrOpen, setQrOpen] = useState(false);
   const [onceToken, setOnceToken] = useState<string | null>(null);
   const [keyName, setKeyName] = useState("default");
+  const [renameValue, setRenameValue] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<"disconnect" | "logout" | "delete" | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
   const [webhookEnabled, setWebhookEnabled] = useState(true);
@@ -128,21 +136,77 @@ export function SessionDetailPage() {
   });
 
   const connect = async () => {
-    await api(`/api/v1/sessions/${id}/connect`, { method: "POST" });
-    setQrOpen(true);
+    setActionError(null);
+    try {
+      await api(`/api/v1/sessions/${id}/connect`, { method: "POST" });
+      setQrOpen(true);
+    } catch (err) {
+      setActionError(
+        friendlySessionError(err instanceof ApiError ? err.code : null) ??
+          (err instanceof ApiError ? err.message : "Connect failed"),
+      );
+    }
+  };
+
+  const runConfirmed = async () => {
+    if (!confirm) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      if (confirm === "disconnect") {
+        await api(`/api/v1/sessions/${id}/disconnect`, { method: "POST" });
+      } else if (confirm === "logout") {
+        await api(`/api/v1/sessions/${id}/logout`, { method: "POST" });
+      } else {
+        await api(`/api/v1/sessions/${id}`, { method: "DELETE" });
+        navigate("/sessions", { replace: true });
+        return;
+      }
+      await queryClient.invalidateQueries({ queryKey: ["session", id] });
+      setConfirm(null);
+    } catch (err) {
+      setActionError(
+        friendlySessionError(err instanceof ApiError ? err.code : null) ??
+          (err instanceof ApiError ? err.message : "Action failed"),
+      );
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const rename = async (event: FormEvent) => {
+    event.preventDefault();
+    const name = renameValue.trim() || session.data?.name;
+    if (!name) return;
+    setActionError(null);
+    try {
+      await api(`/api/v1/sessions/${id}`, { method: "PATCH", json: { name } });
+      setRenameValue("");
+      await queryClient.invalidateQueries({ queryKey: ["session", id] });
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    } catch (err) {
+      setActionError(
+        friendlySessionError(err instanceof ApiError ? err.code : null) ??
+          (err instanceof ApiError ? err.message : "Rename failed"),
+      );
+    }
   };
 
   if (session.isLoading) return <LoadingState />;
   if (session.error) {
     return (
       <ErrorState
-        message={session.error instanceof ApiError ? session.error.message : "Not found"}
+        message={
+          friendlySessionError(session.error instanceof ApiError ? session.error.code : null) ??
+          (session.error instanceof ApiError ? session.error.message : "Not found")
+        }
       />
     );
   }
   if (!session.data) return <EmptyState title="Session not found" />;
 
   const wh = webhook.data;
+  const lastErrorCopy = friendlySessionError(session.data.lastError);
 
   return (
     <div className="mx-auto max-w-4xl space-y-8">
@@ -155,12 +219,76 @@ export function SessionDetailPage() {
           <StatusBadge status={session.data.status} />
         </div>
         <p className="text-sm text-muted">{session.data.phoneNumber ?? "No phone yet"}</p>
+        {lastErrorCopy ? (
+          <p className="mt-2 text-sm text-warn" role="alert">
+            {lastErrorCopy}
+          </p>
+        ) : null}
+        {actionError ? (
+          <p className="mt-2 text-sm text-warn" role="alert">
+            {actionError}
+          </p>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           <Button type="button" onClick={() => void connect()}>
             Connect / show QR
           </Button>
+          <Button type="button" variant="secondary" onClick={() => setConfirm("disconnect")}>
+            Disconnect
+          </Button>
+          <Button type="button" variant="secondary" onClick={() => setConfirm("logout")}>
+            Logout WhatsApp
+          </Button>
+          <Button type="button" variant="destructive" onClick={() => setConfirm("delete")}>
+            Delete
+          </Button>
         </div>
+        <form onSubmit={(e) => void rename(e)} className="mt-4 flex flex-wrap items-end gap-2">
+          <div className="grid gap-1">
+            <Label htmlFor="rename">Rename</Label>
+            <Input
+              id="rename"
+              placeholder={session.data.name}
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              maxLength={120}
+            />
+          </div>
+          <Button type="submit" variant="secondary">
+            Save name
+          </Button>
+        </form>
       </div>
+
+      <ConfirmActionDialog
+        open={confirm === "disconnect"}
+        onOpenChange={(open) => !open && setConfirm(null)}
+        title="Disconnect session?"
+        description="The worker will close the socket. You can connect again without re-scanning if auth is still valid."
+        confirmLabel="Disconnect"
+        busy={actionBusy}
+        onConfirm={runConfirmed}
+      />
+      <ConfirmActionDialog
+        open={confirm === "logout"}
+        onOpenChange={(open) => !open && setConfirm(null)}
+        title="Logout WhatsApp?"
+        description="Clears linked-device auth for this session. You will need to scan a new QR."
+        confirmLabel="Logout"
+        destructive
+        busy={actionBusy}
+        onConfirm={runConfirmed}
+      />
+      <ConfirmActionDialog
+        open={confirm === "delete"}
+        onOpenChange={(open) => !open && setConfirm(null)}
+        title="Delete session?"
+        description="Logs out WhatsApp, removes keys and webhooks for this session. This cannot be undone."
+        confirmLabel="Delete session"
+        destructive
+        busy={actionBusy}
+        onConfirm={runConfirmed}
+      />
 
       <section className="space-y-3">
         <h2 className="font-display text-xl">Session API keys</h2>

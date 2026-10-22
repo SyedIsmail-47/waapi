@@ -32,6 +32,10 @@ curl -sS -X POST "http://127.0.0.1:3001/internal/admin/invites" \
 
 Smoke overlay sets `SIGNUPS_MODE=open` so Playwright can register without invites.
 
+### Session dashboard actions (Phase 4 WP-E)
+
+Session detail: Connect/QR, Disconnect, Logout WhatsApp, Delete (confirm dialogs), Rename (`PATCH /api/v1/sessions/:id`). QR modal shows expiry copy and maps `lastError` codes to friendly text.
+
 ### Account lifecycle (Phase 4 WP-D)
 
 - `POST /api/v1/auth/change-password` — JWT; revokes other refresh tokens.

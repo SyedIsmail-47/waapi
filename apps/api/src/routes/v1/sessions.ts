@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
-import { createSessionBodySchema } from "@waapi/shared";
+import { createSessionBodySchema, updateSessionBodySchema } from "@waapi/shared";
 import { z } from "zod";
 import {
   command,
@@ -7,6 +7,7 @@ import {
   deleteSession,
   getSessionPublic,
   listSessions,
+  renameSession,
   status,
 } from "../../services/sessions.js";
 import { createSessionKey, listSessionKeys, revokeSessionKey } from "../../services/tokens.js";
@@ -41,6 +42,15 @@ const routes: FastifyPluginAsync = async (app) => {
       app.database,
       request.identity.accountId,
       paramsSchema.parse(request.params).id,
+    ),
+  );
+
+  app.patch<{ Params: { id: string } }>("/:id", accountAuth, async (request) =>
+    renameSession(
+      app.database,
+      request.identity.accountId,
+      paramsSchema.parse(request.params).id,
+      updateSessionBodySchema.parse(request.body).name,
     ),
   );
 

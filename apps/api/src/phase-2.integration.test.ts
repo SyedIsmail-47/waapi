@@ -14,6 +14,7 @@ type AuthSession = {
 
 const ACCOUNT_SCOPED_ROUTE_PATTERNS = [
   { method: "GET", url: "/api/v1/sessions/:id" },
+  { method: "PATCH", url: "/api/v1/sessions/:id" },
   { method: "DELETE", url: "/api/v1/sessions/:id" },
   { method: "GET", url: "/api/v1/sessions/:id/status" },
   { method: "POST", url: "/api/v1/sessions/:id/connect" },
@@ -271,12 +272,13 @@ describe("Phase 2 API integration", () => {
     const keyId = keyCreated.json<{ id: string }>().id;
 
     const cases: Array<{
-      method: "GET" | "POST" | "PUT" | "DELETE";
+      method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
       url: string;
       payload?: Record<string, string>;
       idempotency?: boolean;
     }> = [
       { method: "GET", url: `/api/v1/sessions/${sessionId}` },
+      { method: "PATCH", url: `/api/v1/sessions/${sessionId}`, payload: { name: "x" } },
       { method: "GET", url: `/api/v1/sessions/${sessionId}/status` },
       { method: "POST", url: `/api/v1/sessions/${sessionId}/connect` },
       { method: "POST", url: `/api/v1/sessions/${sessionId}/disconnect` },

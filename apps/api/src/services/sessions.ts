@@ -115,6 +115,21 @@ export async function getSessionPublic(database: Db, accountId: string, id: stri
   return toSessionPublic(await getSession(database, accountId, id));
 }
 
+export async function renameSession(
+  database: Db,
+  accountId: string,
+  id: string,
+  name: string,
+) {
+  const row = await getSession(database, accountId, id);
+  const [updated] = await database.db
+    .update(sessions)
+    .set({ name, updatedAt: new Date() })
+    .where(eq(sessions.id, row.id))
+    .returning();
+  return toSessionPublic(updated!);
+}
+
 /**
  * Soft-delete + enqueue logout. Hard delete of row/keys/webhook happens after
  * worker confirmation (logged_out) via finalizeDeletedSessions.
