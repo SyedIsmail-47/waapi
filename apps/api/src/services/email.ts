@@ -10,6 +10,8 @@ export type EmailJobData = {
   token?: string;
   subject?: string;
   text?: string;
+  sessionName?: string;
+  reason?: string;
 };
 
 export type EmailContent = {
@@ -92,6 +94,28 @@ export function buildEmailContent(data: EmailJobData): EmailContent {
        <p><a href="${escapeHtml(link)}">Reset password</a></p>
        <p style="color:#666;font-size:13px">Or paste: ${escapeHtml(link)}</p>
        <p style="color:#666;font-size:13px">If you did not request a reset, ignore this message.</p>`,
+    );
+    return { subject, text, html };
+  }
+
+  if (data.kind === "session_disconnect") {
+    const sessionName = data.sessionName ?? "your session";
+    const reason = (data.reason ?? "disconnected").replace(/_/g, " ");
+    const subject = data.subject ?? `${brand}: session ${reason}`;
+    const text =
+      data.text ??
+      [
+        `Your ${brand} session "${sessionName}" is ${reason}.`,
+        "",
+        "Open the dashboard to reconnect or scan a new QR code.",
+        "You can turn off these emails in account settings.",
+      ].join("\n");
+    const html = wrapHtml(
+      brand,
+      subject,
+      `<p>Your ${escapeHtml(brand)} session <strong>${escapeHtml(sessionName)}</strong> is ${escapeHtml(reason)}.</p>
+       <p>Open the dashboard to reconnect or scan a new QR code.</p>
+       <p style="color:#666;font-size:13px">You can turn off these emails in account settings.</p>`,
     );
     return { subject, text, html };
   }

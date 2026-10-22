@@ -3,7 +3,8 @@ export type SubscriptionStatus =
   | "active"
   | "past_due"
   | "canceled"
-  | "expired";
+  | "expired"
+  | "paused";
 
 export type BillingEvent =
   | { type: "trial_started" }
@@ -13,7 +14,9 @@ export type BillingEvent =
   | { type: "grace_elapsed" }
   | { type: "canceled" }
   | { type: "period_ended" }
-  | { type: "reactivated" };
+  | { type: "reactivated" }
+  | { type: "paused" }
+  | { type: "resumed" };
 
 const ALLOWED: Record<SubscriptionStatus, Partial<Record<BillingEvent["type"], SubscriptionStatus>>> =
   {
@@ -21,16 +24,20 @@ const ALLOWED: Record<SubscriptionStatus, Partial<Record<BillingEvent["type"], S
       trial_ended: "expired",
       payment_succeeded: "active",
       canceled: "canceled",
+      paused: "paused",
     },
     active: {
+      payment_succeeded: "active", // plan change / subscription.updated while active
       payment_failed: "past_due",
       canceled: "canceled",
       period_ended: "expired",
+      paused: "paused",
     },
     past_due: {
       payment_succeeded: "active",
       grace_elapsed: "expired",
       canceled: "canceled",
+      paused: "paused",
     },
     canceled: {
       period_ended: "expired",
@@ -41,6 +48,11 @@ const ALLOWED: Record<SubscriptionStatus, Partial<Record<BillingEvent["type"], S
       payment_succeeded: "active",
       reactivated: "active",
       trial_started: "trialing",
+    },
+    paused: {
+      resumed: "active",
+      payment_succeeded: "active",
+      canceled: "canceled",
     },
   };
 
@@ -64,7 +76,7 @@ export function canUseProduct(
   now: Date,
   graceUntil: Date | null,
 ): boolean {
-  if (status === "expired") return false;
+  if (status === "expired" || status === "paused") return false;
   if (status === "past_due" && graceUntil && now > graceUntil) return false;
   if (status === "canceled") return true; // until period end handled by caller flipping to expired
   return status === "trialing" || status === "active" || status === "past_due";

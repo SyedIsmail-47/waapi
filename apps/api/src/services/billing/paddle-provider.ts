@@ -14,8 +14,29 @@ function paddleSecret(): string {
   return secret;
 }
 
+/** Server-side allowlist: Paddle price id → plan code (from PADDLE_PRICE_IDS). */
+export function planFromPriceId(priceId: string | undefined): string | undefined {
+  if (!priceId) return undefined;
+  const map = config.PADDLE_PRICE_IDS ?? {};
+  for (const [plan, id] of Object.entries(map)) {
+    if (id === priceId) return plan;
+  }
+  return undefined;
+}
+
+function safeEqualHex(a: string, b: string): boolean {
+  try {
+    const ba = Buffer.from(a, "hex");
+    const bb = Buffer.from(b, "hex");
+    if (ba.length === 0 || ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Paddle Billing sandbox adapter (server-created checkout + verified webhooks).
+ * Paddle Billing adapter — server-created checkout + raw-body verified webhooks.
  * Card data never touches our servers.
  */
 export const paddleProvider: BillingProvider = {
@@ -68,22 +89,17 @@ export const paddleProvider: BillingProvider = {
     const signature = headers["paddle-signature"];
     const sig = Array.isArray(signature) ? signature[0] : signature;
     if (!sig) {
-      throw Object.assign(new Error("Missing Paddle signature"), {
+      throw Object.assign(new Error("Unauthorized"), {
         statusCode: 401,
         code: "UNAUTHORIZED",
       });
     }
-    // Paddle sends ts=...;h1=... — verify h1 HMAC of `${ts}:${rawBody}`.
-    const parts = Object.fromEntries(
-      sig.split(";").map((p) => {
-        const [k, v] = p.split("=");
-        return [k?.trim() ?? "", v?.trim() ?? ""];
-      }),
-    );
-    const ts = parts["ts"];
-    const h1 = parts["h1"];
-    if (!ts || !h1) {
-      throw Object.assign(new Error("Invalid Paddle signature format"), {
+    // Paddle: ts=...;h1=...;h1=... (multiple h1 during secret rotation)
+    const tsMatch = /(?:^|;)\s*ts=([^;]+)/.exec(sig);
+    const h1Values = [...sig.matchAll(/(?:^|;)\s*h1=([a-f0-9]+)/gi)].map((m) => m[1]!);
+    const ts = tsMatch?.[1]?.trim();
+    if (!ts || h1Values.length === 0) {
+      throw Object.assign(new Error("Unauthorized"), {
         statusCode: 401,
         code: "UNAUTHORIZED",
       });
@@ -91,7 +107,7 @@ export const paddleProvider: BillingProvider = {
     const tsNum = Number(ts);
     const skewMs = 5 * 60_000;
     if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum * 1000) > skewMs) {
-      throw Object.assign(new Error("Stale Paddle webhook timestamp"), {
+      throw Object.assign(new Error("Unauthorized"), {
         statusCode: 401,
         code: "UNAUTHORIZED",
       });
@@ -99,35 +115,50 @@ export const paddleProvider: BillingProvider = {
     const expected = createHmac("sha256", paddleSecret())
       .update(`${ts}:${rawBody}`)
       .digest("hex");
-    const a = Buffer.from(expected);
-    const b = Buffer.from(h1);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) {
-      throw Object.assign(new Error("Invalid Paddle signature"), {
+    const ok = h1Values.some((h1) => safeEqualHex(expected, h1));
+    if (!ok) {
+      throw Object.assign(new Error("Unauthorized"), {
         statusCode: 401,
         code: "UNAUTHORIZED",
       });
     }
-    const payload = JSON.parse(rawBody) as {
+
+    let payload: {
       event_id?: string;
       event_type?: string;
       data?: {
         custom_data?: { accountId?: string; planCode?: string };
         id?: string;
+        customer_id?: string;
+        items?: Array<{ price?: { id?: string }; price_id?: string }>;
       };
     };
-    const eventId = payload.event_id ?? payload.data?.id;
-    if (!eventId || !payload.event_type) {
-      throw Object.assign(new Error("Malformed Paddle event"), {
-        statusCode: 400,
-        code: "VALIDATION_ERROR",
+    try {
+      payload = JSON.parse(rawBody) as typeof payload;
+    } catch {
+      throw Object.assign(new Error("Unauthorized"), {
+        statusCode: 401,
+        code: "UNAUTHORIZED",
       });
     }
+    const eventId = payload.event_id ?? payload.data?.id;
+    if (!eventId || !payload.event_type) {
+      throw Object.assign(new Error("Unauthorized"), {
+        statusCode: 401,
+        code: "UNAUTHORIZED",
+      });
+    }
+    const priceId =
+      payload.data?.items?.[0]?.price?.id ?? payload.data?.items?.[0]?.price_id;
+    const mappedPlan = planFromPriceId(priceId);
     return {
       provider: "paddle",
       eventId,
       eventType: payload.event_type,
       accountId: payload.data?.custom_data?.accountId,
-      planCode: payload.data?.custom_data?.planCode,
+      planCode: mappedPlan ?? payload.data?.custom_data?.planCode,
+      priceId,
+      customerId: payload.data?.customer_id,
       rawHash: sha256(rawBody),
     };
   },

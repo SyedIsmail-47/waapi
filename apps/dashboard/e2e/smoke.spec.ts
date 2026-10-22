@@ -35,7 +35,7 @@ test.describe("dashboard smoke", () => {
     await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible({
       timeout: 30_000,
     });
-    await expect(page.getByText(/No sessions yet|Create a session/i)).toBeVisible();
+    await expect(page.getByText("No sessions yet")).toBeVisible();
 
     await page.getByRole("link", { name: "Messages" }).click();
     await expect(page.getByRole("heading", { name: "Message log" })).toBeVisible();
@@ -48,7 +48,7 @@ test.describe("dashboard smoke", () => {
     await page.getByRole("button", { name: "Done" }).click();
 
     await page.getByRole("link", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Sign out" }).click();
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   });
 });

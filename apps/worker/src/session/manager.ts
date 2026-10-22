@@ -22,6 +22,7 @@ import type { Redis } from "ioredis";
 import type { StatusDetail, WAClient, WAClientFactory } from "../baileys/types.js";
 import { nextBackoffMs } from "./reconnect.js";
 import { isNonRetryableOpenError } from "./disconnect-reason.js";
+import { alertReasonFromStatus, maybeEnqueueDisconnectAlert } from "./disconnect-alerts.js";
 import { SessionMetrics } from "../metrics.js";
 
 const IMMEDIATE_RECONNECT_WINDOW_MS = 30_000;
@@ -340,6 +341,20 @@ export class SessionManager {
       this.reconnectAttempts.set(client.sessionId, 0);
       this.clearReconnect(client.sessionId);
       return;
+    }
+
+    const alertReason = alertReasonFromStatus(status, detail?.error ?? updated.lastError);
+    if (alertReason) {
+      void maybeEnqueueDisconnectAlert(
+        this.db,
+        this.redis,
+        client.accountId,
+        client.sessionId,
+        alertReason,
+        this.cfg.brandName,
+      ).catch((err) => {
+        this.log.error({ err, sessionId: client.sessionId }, "disconnect alert failed");
+      });
     }
 
     if (detail?.reconnect === "none" || this.shuttingDown) {

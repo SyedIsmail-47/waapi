@@ -10,9 +10,12 @@ describe("WP-F billing state machine", () => {
     { from: "trialing", event: { type: "payment_succeeded" }, to: "active" },
     { from: "trialing", event: { type: "trial_ended" }, to: "expired" },
     { from: "trialing", event: { type: "canceled" }, to: "canceled" },
+    { from: "active", event: { type: "payment_succeeded" }, to: "active" },
     { from: "active", event: { type: "payment_failed" }, to: "past_due" },
     { from: "active", event: { type: "canceled" }, to: "canceled" },
     { from: "active", event: { type: "period_ended" }, to: "expired" },
+    { from: "active", event: { type: "paused" }, to: "paused" },
+    { from: "paused", event: { type: "resumed" }, to: "active" },
     { from: "past_due", event: { type: "payment_succeeded" }, to: "active" },
     { from: "past_due", event: { type: "grace_elapsed" }, to: "expired" },
     { from: "canceled", event: { type: "period_ended" }, to: "expired" },
@@ -37,5 +40,6 @@ describe("WP-F billing state machine", () => {
     expect(canUseProduct("expired", now, null)).toBe(false);
     expect(canUseProduct("past_due", now, new Date("2026-01-12T00:00:00Z"))).toBe(true);
     expect(canUseProduct("past_due", now, new Date("2026-01-09T00:00:00Z"))).toBe(false);
+    expect(canUseProduct("paused", now, null)).toBe(false);
   });
 });

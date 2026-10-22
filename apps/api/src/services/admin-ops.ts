@@ -165,3 +165,28 @@ export async function adminCreateInvite(
   });
   return created;
 }
+
+/** Accounts flagged for manual billing review (refunds/chargebacks). */
+export async function listManualReview(database: Db, limit = 50) {
+  const rows = await db(database)
+    .select({
+      accountId: accounts.id,
+      name: accounts.name,
+      planCode: accounts.planCode,
+      suspendedAt: accounts.suspendedAt,
+      manualReviewAt: accounts.manualReviewAt,
+      manualReviewReason: accounts.manualReviewReason,
+    })
+    .from(accounts)
+    .where(sql`${accounts.manualReviewAt} is not null`)
+    .orderBy(desc(accounts.manualReviewAt))
+    .limit(limit);
+  return rows.map((r) => ({
+    accountId: r.accountId,
+    name: r.name,
+    planCode: r.planCode,
+    suspendedAt: r.suspendedAt?.toISOString() ?? null,
+    manualReviewAt: r.manualReviewAt?.toISOString() ?? null,
+    manualReviewReason: r.manualReviewReason,
+  }));
+}

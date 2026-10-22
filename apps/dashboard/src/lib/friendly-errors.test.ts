@@ -7,6 +7,8 @@ describe("WP-E friendly session errors", () => {
     expect(friendlySessionError("SESSION_NOT_CONNECTED")).toMatch(/not connected/i);
     expect(friendlySessionError("ACCOUNT_SESSION_CAP")).toMatch(/session limit|limit/i);
     expect(friendlySessionError("QR_EXPIRED")).toMatch(/expired/i);
+    expect(friendlySessionError("PHONE_IN_USE")).toMatch(/already linked|another active/i);
+    expect(friendlySessionError("SESSION_SEND_LIMIT")).toMatch(/send limit/i);
   });
 
   it("falls back without leaking raw stacks", () => {

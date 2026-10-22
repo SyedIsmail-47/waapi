@@ -9,6 +9,9 @@ const COPY: Record<string, string> = {
   NOT_FOUND: "Session not found.",
   FORBIDDEN: "You do not have access to this session.",
   RATE_LIMITED: "Too many requests. Wait a moment and try again.",
+  SESSION_SEND_LIMIT: "Send limit reached for this session. Wait and try again, or upgrade your plan.",
+  PHONE_IN_USE: "That WhatsApp number is already linked to another active session.",
+  BILLING_EXPIRED: "Your subscription has expired. Update billing to continue.",
 };
 
 /** Map API error codes / lastError strings to short dashboard copy. */

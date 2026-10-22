@@ -95,14 +95,30 @@ pnpm admin -- revoke-keys --account <uuid>
 pnpm admin -- force-logout --session <uuid>
 pnpm admin -- failing-webhooks
 pnpm admin -- create-invite --hours 168
+pnpm admin -- manual-review [--limit 50]
 ```
 
-### Billing (Phase 4 WP-F)
+### Billing (Phase 4 WP-F / WP-N)
 
-- Design: `docs/design/billing.md`. Default `BILLING_PROVIDER=manual`, `TRIAL_DAYS=3`.
+Billing is **manual + Paddle** only (no Stripe). Design: `docs/design/billing.md`.
+
+- Default `BILLING_PROVIDER=manual`, `TRIAL_DAYS=3`.
 - Dashboard: `/settings/billing` — plan/status; upgrade CTA contacts support (or Paddle checkout URL when configured).
-- Enforcement: expired → `402 BILLING_EXPIRED` on create session / send.
-- Paddle sandbox webhook: `POST /api/v1/billing/webhooks/paddle` (signature verified; events idempotent).
+- Enforcement: expired → `402 BILLING_EXPIRED` on create session / send. Billing GET and delete-account always allowed.
+- Per-plan send limits (minute/day) + 7-day warm-up → `429 SESSION_SEND_LIMIT` + `Retry-After`.
+- Disconnect / logged_out / connection_replaced emails (6h dedupe, opt-out).
+- Sweeper: trial/`past_due` past grace → `expired`; extras disconnected via queue.
+- Paddle webhook: `POST /api/v1/billing/webhooks/paddle` — verifies `Paddle-Signature` over exact raw body (`ts:rawBody`), multi-`h1` rotation, ±5m skew; never re-stringify. Duplicate `event_id` → 200 no-op.
+
+#### Paddle go-live checklist
+
+1. Create Paddle Billing sandbox (then live) notification destination → `https://<api-host>/api/v1/billing/webhooks/paddle`.
+2. Subscribe at least: `subscription.activated`, `subscription.updated`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`, `transaction.completed`, `transaction.payment_failed`, `adjustment.created`, `adjustment.updated`.
+3. Set `BILLING_PROVIDER=paddle`, `PADDLE_ENV=sandbox|production`, `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_PRICE_IDS_JSON` (plan→price id allowlist).
+4. Confirm checkout `custom_data.accountId` is set server-side from JWT (never trust client alone).
+5. Replay a signed fixture with whitespace ≠ `JSON.stringify(JSON.parse(raw))`; expect 200 then duplicate 200.
+6. Trigger a sandbox refund/`adjustment.created` → account appears in `pnpm admin -- manual-review` (no auto-suspend).
+7. Flip to live keys only after sandbox matrix pass; keep manual provider as break-glass.
 
 ### Session dashboard actions (Phase 4 WP-E)
 

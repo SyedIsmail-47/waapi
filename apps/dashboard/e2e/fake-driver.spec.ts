@@ -48,7 +48,7 @@ test.describe("fake driver closed-beta path", () => {
       timeout: 15_000,
     });
     await page.getByRole("link", { name: "fake-e2e" }).click();
-    await page.getByRole("button", { name: /Connect/i }).click();
+    await page.getByRole("button", { name: "Connect / show QR" }).click();
     await expect(page.getByText(/Ban risk/i)).toBeVisible();
 
     // Use API login for bearer (browser cookie jar is separate from this request context).
@@ -73,7 +73,7 @@ test.describe("fake driver closed-beta path", () => {
       `${internalBase}/internal/admin/fake/sessions/${session!.id}/scan`,
       {
         headers: { "x-admin-secret": adminSecret, "content-type": "application/json" },
-        data: { phoneNumber: "+15550009999" },
+        data: { phoneNumber: `+1555${String(Date.now()).slice(-7)}` },
       },
     );
     expect(scan.status()).toBe(202);
