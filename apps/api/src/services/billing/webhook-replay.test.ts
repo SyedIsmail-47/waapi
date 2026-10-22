@@ -63,11 +63,22 @@ describe("WP-F paddle webhook replay", () => {
   });
 
   it("rejects bad signatures", async () => {
+    const raw = "{}";
+    const ts = String(Math.floor(Date.now() / 1000));
     await expect(
       paddleProvider.verifyWebhook(
-        { "paddle-signature": "ts=1;h1=deadbeef" },
-        "{}",
+        { "paddle-signature": `ts=${ts};h1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef` },
+        raw,
       ),
     ).rejects.toThrow(/signature/i);
+  });
+
+  it("rejects stale timestamps", async () => {
+    const raw = "{}";
+    const ts = String(Math.floor(Date.now() / 1000) - 3600);
+    const h1 = createHmac("sha256", secret).update(`${ts}:${raw}`).digest("hex");
+    await expect(
+      paddleProvider.verifyWebhook({ "paddle-signature": `ts=${ts};h1=${h1}` }, raw),
+    ).rejects.toThrow(/stale/i);
   });
 });

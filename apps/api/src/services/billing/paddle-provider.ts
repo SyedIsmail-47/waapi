@@ -88,6 +88,14 @@ export const paddleProvider: BillingProvider = {
         code: "UNAUTHORIZED",
       });
     }
+    const tsNum = Number(ts);
+    const skewMs = 5 * 60_000;
+    if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum * 1000) > skewMs) {
+      throw Object.assign(new Error("Stale Paddle webhook timestamp"), {
+        statusCode: 401,
+        code: "UNAUTHORIZED",
+      });
+    }
     const expected = createHmac("sha256", paddleSecret())
       .update(`${ts}:${rawBody}`)
       .digest("hex");
