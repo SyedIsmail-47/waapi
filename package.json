@@ -12,6 +12,7 @@
     "dev:api": "pnpm --filter @waapi/api dev",
     "dev:webhooks": "pnpm --filter @waapi/api dev:webhooks",
     "dev:dashboard": "pnpm --filter @waapi/dashboard dev",
+    "build:site": "pnpm --filter @waapi/shared build && pnpm --filter @waapi/site build",
     "lint": "eslint .",
     "typecheck": "pnpm --filter @waapi/shared build && pnpm --filter @waapi/db build && pnpm -r run typecheck",
     "test": "vitest run",

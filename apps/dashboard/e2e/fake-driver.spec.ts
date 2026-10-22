@@ -23,7 +23,7 @@ test.describe("fake driver closed-beta path", () => {
     request,
   }) => {
     const register = await request.post("/api/v1/auth/register", {
-      data: { email, password, name: "FakeE2E" },
+      data: { email, password, name: "FakeE2E", acceptTerms: true },
     });
     expect(register.ok()).toBeTruthy();
     const body = (await register.json()) as { verificationToken?: string };

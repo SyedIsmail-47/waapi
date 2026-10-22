@@ -29,7 +29,7 @@ describe("WP-G admin ops", () => {
     const reg = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: label },
+      payload: {email, password, name: label, acceptTerms: true},
     });
     const body = reg.json<{ accountId: string; userId: string; verificationToken?: string }>();
     await app.inject({

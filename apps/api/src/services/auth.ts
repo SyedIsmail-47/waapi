@@ -21,6 +21,7 @@ import {
   webhookOutbox,
   type Db,
 } from "@waapi/db";
+import { CURRENT_TERMS_VERSION } from "@waapi/shared";
 import { config, getSignupsMode } from "../config.js";
 import { randomToken, sha256 } from "../lib/crypto.js";
 import { consumeInviteCode } from "./invites.js";
@@ -92,7 +93,13 @@ function isUniqueViolation(err: unknown): boolean {
 
 export async function register(
   database: Db,
-  input: { email: string; password: string; name?: string; inviteCode?: string },
+  input: {
+    email: string;
+    password: string;
+    name?: string;
+    inviteCode?: string;
+    acceptTerms?: boolean;
+  },
   ip?: string,
 ) {
   const mode = getSignupsMode();
@@ -106,6 +113,12 @@ export async function register(
     throw Object.assign(new Error("Invite code required"), {
       statusCode: 400,
       code: "INVITE_REQUIRED",
+    });
+  }
+  if (input.acceptTerms !== true) {
+    throw Object.assign(new Error("You must accept the Terms of Service"), {
+      statusCode: 400,
+      code: "TERMS_REQUIRED",
     });
   }
 
@@ -123,7 +136,14 @@ export async function register(
         .returning();
       const [user] = await tx
         .insert(users)
-        .values({ accountId: account!.id, email, passwordHash, role: "owner" })
+        .values({
+          accountId: account!.id,
+          email,
+          passwordHash,
+          role: "owner",
+          termsVersion: CURRENT_TERMS_VERSION,
+          termsAcceptedAt: new Date(),
+        })
         .returning();
       if (mode === "invite") {
         await consumeInviteCode(tx, input.inviteCode!, user!.id);

@@ -13,20 +13,24 @@ const PAGES = ["", "pricing", "docs", "terms", "privacy", "refund", "aup", "cont
 describe("WP-J public site build", () => {
   it("prerenders static HTML for all marketing routes with DRAFT legal + disclaimer", () => {
     rmSync(dist, { recursive: true, force: true });
-    execFileSync("pnpm", ["--filter", "@waapi/site", "build"], {
-      cwd: root,
-      env: {
-        ...process.env,
-        BRAND_NAME: "waapi",
-        LEGAL_NAME: "LEGAL_NAME",
-        LEGAL_ADDRESS: "[registered address]",
-        MERCHANT_OF_RECORD: "false",
-        PUBLIC_APP_URL: "https://app.example.com",
-        CONTACT_EMAIL: "support@example.com",
+    execFileSync(
+      process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+      ["--filter", "@waapi/site", "build"],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          BRAND_NAME: "waapi",
+          LEGAL_NAME: "LEGAL_NAME",
+          LEGAL_ADDRESS: "[registered address]",
+          MERCHANT_OF_RECORD: "false",
+          PUBLIC_APP_URL: "https://app.example.com",
+          CONTACT_EMAIL: "support@example.com",
+        },
+        stdio: "pipe",
+        shell: process.platform === "win32",
       },
-      stdio: "pipe",
-      shell: true,
-    });
+    );
 
     for (const page of PAGES) {
       const file = page === "" ? resolve(dist, "index.html") : resolve(dist, page, "index.html");
@@ -51,20 +55,24 @@ describe("WP-J public site build", () => {
 
   it("includes merchant-of-record clause when MERCHANT_OF_RECORD=true", () => {
     rmSync(dist, { recursive: true, force: true });
-    execFileSync("pnpm", ["--filter", "@waapi/site", "build"], {
-      cwd: root,
-      env: {
-        ...process.env,
-        BRAND_NAME: "waapi",
-        LEGAL_NAME: "Acme Legal LLC",
-        LEGAL_ADDRESS: "1 Main St",
-        MERCHANT_OF_RECORD: "true",
-        PUBLIC_APP_URL: "https://app.example.com",
-        CONTACT_EMAIL: "support@example.com",
+    execFileSync(
+      process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+      ["--filter", "@waapi/site", "build"],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          BRAND_NAME: "waapi",
+          LEGAL_NAME: "Acme Legal LLC",
+          LEGAL_ADDRESS: "1 Main St",
+          MERCHANT_OF_RECORD: "true",
+          PUBLIC_APP_URL: "https://app.example.com",
+          CONTACT_EMAIL: "support@example.com",
+        },
+        stdio: "pipe",
+        shell: process.platform === "win32",
       },
-      stdio: "pipe",
-      shell: true,
-    });
+    );
     const terms = readFileSync(resolve(dist, "terms", "index.html"), "utf8");
     expect(terms).toMatch(/merchant of record/i);
   });

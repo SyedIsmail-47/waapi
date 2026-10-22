@@ -34,7 +34,7 @@ pnpm build:site
 - Pricing caps come from `packages/shared/src/plans.ts` (same as billing design).
 - Legal pages are marked **DRAFT** for lawyer review. Set `MERCHANT_OF_RECORD=true` to include the merchant-of-record clause on Terms.
 - Cloudflare Pages: project root `apps/site`, build command `pnpm --filter @waapi/site build` (or monorepo install + build), output directory `dist`. No secrets in the static bundle — only public placeholders.
-- Dashboard signup checkbox stores `users.terms_version` + `users.terms_accepted_at` (migration `0009_terms_accepted`). Set `VITE_PUBLIC_SITE_URL` on the dashboard so Terms/Privacy links point at the marketing site.
+- Dashboard signup checkbox stores `users.terms_version` + `users.terms_accepted_at` (migration `0010_terms_accepted`). Set `VITE_PUBLIC_SITE_URL` on the dashboard so Terms/Privacy links point at the marketing site.
 
 ### Dashboard (Phase 3)
 

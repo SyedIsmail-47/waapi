@@ -14,3 +14,5 @@ review-*.txt
 *.tsbuildinfo
 drizzle/meta/*_snapshot.json
 !drizzle/meta/_journal.json
+
+apps/site/dist

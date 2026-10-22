@@ -17,7 +17,7 @@ test.describe("dashboard smoke", () => {
   }) => {
     // Register via API so we can verify with DEV path when available, else Mailpit.
     const register = await request.post("/api/v1/auth/register", {
-      data: { email, password, name: "E2E" },
+      data: { email, password, name: "E2E", acceptTerms: true },
     });
     expect(register.ok()).toBeTruthy();
     const body = (await register.json()) as { verificationToken?: string };

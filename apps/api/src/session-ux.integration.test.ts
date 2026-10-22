@@ -24,7 +24,7 @@ describe("WP-E session rename", () => {
     const registered = await app.inject({
       method: "POST",
       url: "/api/v1/auth/register",
-      payload: { email, password, name: label },
+      payload: {email, password, name: label, acceptTerms: true},
     });
     const body = registered.json<{
       accountId: string;

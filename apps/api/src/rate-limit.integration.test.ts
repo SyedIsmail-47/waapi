@@ -98,7 +98,7 @@ describe("rate-limit tiers", () => {
       method: "POST",
       url: "/api/v1/auth/register",
       remoteAddress,
-      payload: { email, password, name: label },
+      payload: {email, password, name: label, acceptTerms: true},
     });
     expect(registered.statusCode).toBe(201);
     const body = registered.json<{
