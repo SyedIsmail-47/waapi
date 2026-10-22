@@ -51,13 +51,7 @@ test.describe("fake driver closed-beta path", () => {
     await page.getByRole("button", { name: /Connect/i }).click();
     await expect(page.getByText(/Ban risk/i)).toBeVisible();
 
-    // Wait until session exists then trigger fake scan via internal admin.
-    const list = await request.get("/api/v1/sessions", {
-      headers: {
-        // cookie session from browser isn't on request; login via API for token
-      },
-    });
-    // Use API login for bearer
+    // Use API login for bearer (browser cookie jar is separate from this request context).
     const login = await request.post("/api/v1/auth/login", {
       data: { email, password },
     });
