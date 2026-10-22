@@ -31,18 +31,19 @@ Generated as part of Phase 4 WP-M. **No secrets** in this file.
 
 ## OWASP ZAP baseline triage (WP-N)
 
-Run against smoke stack (`docker compose …smoke…` on `:8080`). Update rows after each run.
+Ran against smoke (`http://host.docker.internal:8080`). Result: **FAIL-NEW: 0**, WARN-NEW: 7, PASS: 60. Log: `docs/reports/zap-baseline-latest.txt` (gitignored if present).
 
 | Alert | Risk | Status | Reason |
 |-------|------|--------|--------|
-| CSP: Wildcard Directive / missing directives | Low/Info | **Accepted** | Edge nginx ships a restrictive CSP; ZAP flags SPA `script-src`/'self' patterns and report-only noise |
-| Absence of Anti-CSRF Tokens (API JSON) | Info | **Accepted** | Cookie-mode refresh/logout use double-submit CSRF; Bearer PAT/JWT APIs are not browser form posts |
-| Cookie No HttpOnly Flag (`waapi_csrf`) | Low | **Accepted** | CSRF double-submit cookie must be readable by JS; refresh cookie is HttpOnly |
-| Application Error Disclosure / 404 on unknown SPA paths | Info | **Accepted** | Dashboard history-fallback returns index.html; API 404s are generic JSON |
-| Strict-Transport-Security | Low | **Fixed** | Edge nginx sets HSTS (see M-2); validate behind real TLS terminator |
-| X-Content-Type-Options / X-Frame-Options | Low | **Fixed** | Set in nginx (M-2) |
-| Server Leaks Version Information | Low | **Deferred** | Prefer hide `Server` at TLS terminator; low risk on closed beta |
-| Timestamp Disclosure | Info | **Accepted** | Standard `Date` / build metadata; no secrets |
+| CSP: Wildcard Directive [10055] | Low | **Accepted** | SPA nginx CSP; ZAP noise on robots/sitemap |
+| Server Leaks Version (`Server` header) [10036] | Low | **Deferred** | Hide at TLS terminator; low risk closed beta |
+| Storable and Cacheable Content [10049] | Info | **Accepted** | Static SPA assets intentionally cacheable |
+| Permissions-Policy missing [10063] | Low | **Deferred** | Add at edge nginx pre-launch if needed |
+| Modern Web Application [10109] | Info | **Accepted** | Informational SPA detection |
+| Sub Resource Integrity missing [90003] | Low | **Accepted** | Same-origin bundled assets; SRI optional |
+| Cross-Origin-Embedder-Policy missing [90004] | Low | **Deferred** | Not required for this product surface yet |
+| Absence of Anti-CSRF Tokens | Info | **Accepted** (PASS in this run) | Cookie refresh uses double-submit CSRF |
+| Strict-Transport-Security | — | **Fixed** (PASS) | Edge nginx HSTS (M-2) |
 
 ## Rules confirmation
 

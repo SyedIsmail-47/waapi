@@ -22,3 +22,5 @@ apps/site/dist-test-*
 review-pack-1.md
 review-pack-2.md
 **/review-pack-*.md
+
+docs/reports/zap-baseline-latest.txt
