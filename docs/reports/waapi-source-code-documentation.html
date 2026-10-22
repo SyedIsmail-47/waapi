@@ -24,7 +24,8 @@
     <div><strong>Document type:</strong> Source code documentation</div>
     <div><strong>Companion:</strong> Project Report PDF</div>
     <div><strong>Root:</strong> <code>waapi/</code> (git repo)</div>
-    <div><strong>Tip:</strong> phase-4 / phase-5-parity @ 19a400a</div>
+    <div><strong>Tip:</strong> phase-4 (reports refresh after ff02a85)</div>
+    <div><strong>PR:</strong> https://github.com/SyedIsmail-47/waapi/pull/4</div>
     <div><strong>Date:</strong> 22 October 2026</div>
   </div>
 </section>
@@ -261,8 +262,8 @@ packages/db/
   <tr><td><code>smoke-prod.ts</code></td><td>Prod-shaped smoke</td></tr>
   <tr><td><code>nginx-security-curl.sh</code></td><td>Header/probe checks</td></tr>
   <tr><td><code>rate-limit-probe.ps1</code></td><td>Live rate-limit probe</td></tr>
-  <tr><td><code>ram-probe.ts</code></td><td>Session RAM estimate</td></tr>
-  <tr><td><code>build-review-packs.mjs</code></td><td>Regenerate review packs</td></tr>
+  <tr><td><code>ram-probe.ts</code></td><td>In-memory session-slot RSS probe (results in runbook)</td></tr>
+  <tr><td><code>build-review-packs.mjs</code></td><td>Regenerate gitignored review packs (never commit packs)</td></tr>
 </table>
 
 <h2>10. deploy/</h2>
@@ -279,7 +280,9 @@ packages/db/
   <li>Pino redaction paths for auth headers/cookies/tokens/passwords/text</li>
   <li>Turnstile on auth forms; rate limits (IP / failed auth / account / route)</li>
   <li>Webhook URL SSRF checks; signed outbound deliveries</li>
-  <li>Gitleaks + Playwright e2e in CI; preflight rejects placeholders and console email in prod</li>
+  <li>Gitleaks + Playwright e2e in CI; workflow default <code>permissions: contents: read</code>; no <code>pull_request_target</code></li>
+  <li>Preflight rejects placeholders and console email in prod</li>
+  <li>Public tree: security-pass / Claude handoff removed (private ops pack only)</li>
 </ul>
 <h3>11.2 Multi-tenancy</h3>
 <ul>
@@ -309,7 +312,8 @@ packages/db/
   <tr><td><code>e2e/smoke.spec.ts</code> + <code>fake-driver.spec.ts</code></td><td>N6 Playwright</td></tr>
   <tr><td><code>wa-client.contract.test.ts</code></td><td>Fake ↔ real driver contract</td></tr>
 </table>
-<p>Last full suite: <strong>306 passed | 2 skipped</strong> (308).</p>
+<p>Last full suite: <strong>306 passed | 2 skipped</strong> (308). Skips: <code>backup-restore.test.ts</code> age/gzip roundtrip and live DB restore (<code>skipIf</code> tools/env).</p>
+<p>Operator acceptance (runbook): phone send/receive, network drop, logout done; RAM table filled from <code>pnpm ram-probe</code>.</p>
 
 <h2>13. Config entry points</h2>
 <ul>

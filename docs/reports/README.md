@@ -14,6 +14,8 @@ node docs/reports/render-pdfs.mjs
 These are public engineering handoff docs. They contain no secrets.
 
 **Private (not in this repo):** security-pass triage and Claude Phase-4 handoff
-were moved out of the public tree to a local private ops pack
-(`waapi-private-ops/` sibling directory on the maintainer machine). Do not
-re-commit those files here.
+live in the maintainer private ops pack (`waapi-private-ops/` sibling directory).
+Do not re-commit those files here.
+
+**Also gitignored:** `review-pack-1.md` / `review-pack-2.md` (full source dumps) —
+upload privately for review if needed; never push to GitHub.

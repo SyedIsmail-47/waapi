@@ -22,10 +22,10 @@
   <div class="meta">
     <div><strong>Document type:</strong> Project report (overview for handoff / Claude)</div>
     <div><strong>Companion doc:</strong> Source Code Documentation PDF</div>
-    <div><strong>Branch tip (at generation):</strong> phase-4 / phase-5-parity @ 19a400a</div>
-    <div><strong>PR:</strong> https://github.com/SyedIsmail-47/waapi/pull/4 (phase-4 → main)</div>
+    <div><strong>Branch tip (at generation):</strong> phase-4 (reports refresh; includes ff02a85 + this commit)</div>
+    <div><strong>PR:</strong> https://github.com/SyedIsmail-47/waapi/pull/4 (phase-4 → main) — open, do not merge until approved</div>
     <div><strong>Date:</strong> 22 October 2026</div>
-    <div><strong>Classification:</strong> Internal engineering — no secrets</div>
+    <div><strong>Classification:</strong> Public engineering docs — no secrets</div>
   </div>
 </section>
 
@@ -174,11 +174,26 @@
 
 <h2>8. Testing &amp; CI</h2>
 <ul>
-  <li>Vitest: <strong>306 passed, 2 skipped</strong> (308 total) under <code>CI=true</code></li>
-  <li>Playwright e2e on smoke stack (signup → verify → session → fake scan)</li>
-  <li>GitHub Actions jobs: <code>build</code>, <code>gitleaks</code>, <code>e2e (smoke + playwright)</code></li>
+  <li>Vitest: <strong>306 passed, 2 skipped</strong> (308 total) under <code>CI=true</code> — skips are <code>backup-restore</code> age/gzip and live-DB probes</li>
+  <li>Playwright e2e on smoke stack (signup → verify → session → fake scan); required check on public <code>main</code></li>
+  <li>GitHub Actions jobs: <code>build</code>, <code>gitleaks</code>, <code>e2e (smoke + playwright)</code>; workflow <code>permissions: contents: read</code></li>
   <li>Stable green run example: <code>39761141553</code> (phase-4 merge tip)</li>
   <li>Route / billing enforcement matrix tests; ZAP FAIL-NEW 0 against smoke</li>
+</ul>
+
+<h2>8.1 Manual acceptance &amp; RAM (operator)</h2>
+<ul>
+  <li><strong>Phone send/receive</strong> (incl. outbound to a contact), <strong>network drop</strong>, <strong>phone logout</strong> — completed by operator; noted in <code>docs/runbook.md</code></li>
+  <li><strong>RAM probe</strong> (<code>pnpm ram-probe</code>, in-memory slot sim, 2026-10-22): 0→74.8 MB, 1→75.3, 3→76.8, 5→79.3, 10→84.3 MB — table filled in runbook §9</li>
+  <li>Still optional on VPS: kill -9 recovery, 440 replaced, node cap, live Baileys RSS vs probe</li>
+</ul>
+
+<h2>8.2 Public exposure audit (post go-public)</h2>
+<ul>
+  <li>gitleaks + trufflehog over all refs: <strong>no secrets found</strong></li>
+  <li>Security-pass + Claude handoff removed from public tree (<code>2b2b6fe</code>); copies only in local private ops pack</li>
+  <li>Runbook host/rclone example paths sanitized to placeholders</li>
+  <li>Verdict: no credential rotation required; personal commit email still in history (noreply switch pending)</li>
 </ul>
 
 <h2>9. Known gaps &amp; risks</h2>
@@ -189,6 +204,7 @@
   <li>ZAP WARN-NEW items deferred/accepted (private ops pack; not published)</li>
   <li>Nothing is auto-deployed from this repo; go-live is manual VPS + Cloudflare</li>
   <li>PR #4 not yet merged to <code>main</code> (intentional until you approve)</li>
+  <li>Review packs (<code>review-pack-*.md</code>) are gitignored — upload privately if needed for review</li>
 </ul>
 
 <h2>10. How to run locally</h2>
@@ -206,7 +222,7 @@ pnpm build:site        # apps/site/dist
 <h2>11. Documents map</h2>
 <table>
   <tr><th>Path</th><th>Purpose</th></tr>
-  <tr><td><code>docs/runbook.md</code></td><td>Ops, smoke, admin, billing, Paddle go-live checklist</td></tr>
+  <tr><td><code>docs/runbook.md</code></td><td>Ops, smoke, admin, billing, Paddle checklist, RAM table, phone acceptance</td></tr>
   <tr><td><code>docs/design/billing.md</code></td><td>Billing design (manual + Paddle)</td></tr>
   <tr><td><code>docs/reports/waapi-project-report.pdf</code></td><td>This report</td></tr>
   <tr><td><code>docs/reports/waapi-source-code-documentation.pdf</code></td><td>Source tree &amp; module guide</td></tr>
