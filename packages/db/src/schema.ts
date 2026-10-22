@@ -25,6 +25,10 @@ export const accounts = pgTable("accounts", {
   maxSessions: integer("max_sessions").notNull().default(1),
   planCode: text("plan_code").notNull().default("dev"),
   suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+  /** Set on refund/chargeback — admin CLI lists for manual review (no auto-suspend). */
+  manualReviewAt: timestamp("manual_review_at", { withTimezone: true }),
+  manualReviewReason: text("manual_review_reason"),
+  disconnectAlertsOptOut: boolean("disconnect_alerts_opt_out").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -68,6 +72,7 @@ export const sessions = pgTable(
     nodeId: text("node_id"),
     lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    lastDisconnectAlertAt: timestamp("last_disconnect_alert_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -78,6 +83,18 @@ export const sessions = pgTable(
       .where(sql`${t.phoneNumber} is not null and ${t.status} not in ('logged_out', 'error')`),
   }),
 );
+
+/** Per-session send rate counters (minute + day buckets). */
+export const sessionSendCounters = pgTable("session_send_counters", {
+  sessionId: uuid("session_id")
+    .primaryKey()
+    .references(() => sessions.id, { onDelete: "cascade" }),
+  dayKey: text("day_key").notNull(),
+  dayCount: integer("day_count").notNull().default(0),
+  minuteKey: text("minute_key").notNull(),
+  minuteCount: integer("minute_count").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const waAuthCreds = pgTable("wa_auth_creds", {
   sessionId: uuid("session_id")
@@ -235,6 +252,7 @@ export const SUBSCRIPTION_STATUSES = [
   "past_due",
   "canceled",
   "expired",
+  "paused",
 ] as const;
 
 export const subscriptions = pgTable(

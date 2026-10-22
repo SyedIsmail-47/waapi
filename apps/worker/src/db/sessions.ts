@@ -99,24 +99,55 @@ export async function updateSessionStatus(
   status: SessionStatus,
   patch: { lastError?: string | null; phoneNumber?: string | null } = {},
 ) {
-  const [row] = await db
-    .update(sessions)
-    .set({
-      status,
-      lastError: patch.lastError === undefined ? undefined : patch.lastError,
-      phoneNumber: patch.phoneNumber === undefined ? undefined : patch.phoneNumber,
-      lastConnectedAt: status === "connected" ? new Date() : undefined,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(sessions.id, sessionId),
-        eq(sessions.accountId, accountId),
-        ne(sessions.status, "logged_out"),
-      ),
-    )
-    .returning();
-  return row ?? null;
+  try {
+    const [row] = await db
+      .update(sessions)
+      .set({
+        status,
+        lastError: patch.lastError === undefined ? undefined : patch.lastError,
+        phoneNumber: patch.phoneNumber === undefined ? undefined : patch.phoneNumber,
+        lastConnectedAt: status === "connected" ? new Date() : undefined,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(sessions.id, sessionId),
+          eq(sessions.accountId, accountId),
+          ne(sessions.status, "logged_out"),
+        ),
+      )
+      .returning();
+    return row ?? null;
+  } catch (err) {
+    const codes: string[] = [];
+    let cur: unknown = err;
+    for (let i = 0; i < 4 && cur && typeof cur === "object"; i++) {
+      if ("code" in cur && typeof (cur as { code?: unknown }).code === "string") {
+        codes.push((cur as { code: string }).code);
+      }
+      cur = "cause" in cur ? (cur as { cause?: unknown }).cause : undefined;
+    }
+    // Partial unique index sessions_phone_active_uidx
+    if (codes.includes("23505") && patch.phoneNumber) {
+      const [row] = await db
+        .update(sessions)
+        .set({
+          status: "error",
+          lastError: "PHONE_IN_USE",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(sessions.id, sessionId),
+            eq(sessions.accountId, accountId),
+            ne(sessions.status, "logged_out"),
+          ),
+        )
+        .returning();
+      return row ?? null;
+    }
+    throw err;
+  }
 }
 
 /** Prefer crash-recovery of connecting/connected. Excludes `error` and `logged_out`. */

@@ -129,6 +129,9 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
     void purgeRetentionTables(database).catch(() => undefined);
     void finalizeDeletedSessions(database).catch(() => undefined);
     void sweepStaleOutbound(database).catch(() => undefined);
+    void import("./services/billing/index.js").then(({ sweepBillingExpirations }) =>
+      sweepBillingExpirations(database),
+    ).catch(() => undefined);
   }, 60 * 60_000);
   purgeTimer.unref?.();
 
@@ -139,9 +142,18 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
   }, 30_000);
   sweepTimer.unref?.();
 
+  // Billing trial/grace expiry (every 5 min).
+  const billingSweepTimer = setInterval(() => {
+    void import("./services/billing/index.js").then(({ sweepBillingExpirations }) =>
+      sweepBillingExpirations(database),
+    ).catch(() => undefined);
+  }, 5 * 60_000);
+  billingSweepTimer.unref?.();
+
   app.addHook("onClose", async () => {
     clearInterval(purgeTimer);
     clearInterval(sweepTimer);
+    clearInterval(billingSweepTimer);
     await closeQueues();
     await database.client.end();
   });

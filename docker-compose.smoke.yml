@@ -42,3 +42,13 @@ services:
       SMOKE_MODE: "true"
       WA_DRIVER: fake
       FAKE_QR_DELAY_MS: "30"
+
+  webhooks:
+    environment:
+      NODE_ENV: test
+      SMOKE_MODE: "true"
+      DEV_RETURN_TOKENS: "true"
+      TURNSTILE_DISABLED: "true"
+      EMAIL_DRIVER: smtp
+      SMTP_URL: smtp://mailpit:1025
+      EMAIL_FROM: noreply@waapi.smoke.local

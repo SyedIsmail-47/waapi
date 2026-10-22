@@ -10,6 +10,7 @@ import {
   findUser,
   forceSessionLogout,
   listFailingWebhooks,
+  listManualReview,
   revokeAllKeys,
   suspendAccount,
 } from "../../services/admin-ops.js";
@@ -97,6 +98,13 @@ const routes: FastifyPluginAsync = async (app) => {
       .object({ limit: z.coerce.number().int().min(1).max(200).optional() })
       .parse(request.query).limit;
     return { items: await listFailingWebhooks(app.database, limit) };
+  });
+
+  app.get("/billing/manual-review", async (request) => {
+    const limit = z
+      .object({ limit: z.coerce.number().int().min(1).max(200).optional() })
+      .parse(request.query).limit;
+    return { items: await listManualReview(app.database, limit) };
   });
 
   /** Create a single-use invite code (plaintext returned once). */

@@ -19,6 +19,7 @@ function usage(): never {
   pnpm admin -- force-logout --session <uuid>
   pnpm admin -- failing-webhooks [--limit 50]
   pnpm admin -- create-invite [--hours 168] [--note text]
+  pnpm admin -- manual-review [--limit 50]
 `);
   process.exit(1);
 }
@@ -120,6 +121,17 @@ async function main(): Promise<void> {
     })) as { code: string; expiresAt: string };
     // Print invite code once (intentional); never log hashes.
     console.log(JSON.stringify({ code: created.code, expiresAt: created.expiresAt }));
+    return;
+  }
+  if (cmd === "manual-review") {
+    const limit = arg("--limit") ?? "50";
+    console.log(
+      JSON.stringify(
+        await admin("GET", `/billing/manual-review?limit=${encodeURIComponent(limit)}`),
+        null,
+        2,
+      ),
+    );
     return;
   }
 
