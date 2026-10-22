@@ -54,6 +54,7 @@ export const routeResponseSchemas: RouteResponseSchema[] = [
   { method: "POST", url: "/api/v1/sessions", status: 201, schema: sessionDto },
   { method: "GET", url: "/api/v1/sessions", status: 200, schema: z.array(sessionDto) },
   { method: "GET", url: "/api/v1/sessions/:id", status: 200, schema: sessionDto },
+  { method: "PATCH", url: "/api/v1/sessions/:id", status: 200, schema: sessionDto },
   { method: "DELETE", url: "/api/v1/sessions/:id", status: 202, schema: deleteAccepted },
   { method: "POST", url: "/api/v1/sessions/:id/connect", status: 202, schema: accepted },
   { method: "POST", url: "/api/v1/sessions/:id/disconnect", status: 202, schema: accepted },

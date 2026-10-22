@@ -431,6 +431,10 @@ describe("Phase 2 round 3", () => {
         if (mode === "session_key") return 403;
         return [202, 404, 409];
       }
+      if (method === "PATCH" && url.includes("/sessions/")) {
+        if (mode === "session_key") return 403;
+        return [200, 400, 404];
+      }
       if (method === "GET" && url.includes("/sessions/")) {
         if (mode === "session_key") return 403;
         return [200, 404];

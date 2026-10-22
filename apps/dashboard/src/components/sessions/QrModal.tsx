@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { useSessionStatus } from "@/hooks/use-session-status";
 import { api } from "@/lib/api-client";
+import { friendlySessionError } from "@/lib/friendly-errors";
 
 export function QrModal({
   open,
@@ -24,14 +25,21 @@ export function QrModal({
 }) {
   const status = useSessionStatus(sessionId, open);
 
-  const qrValue = useMemo(() => {
+  const expired = useMemo(() => {
     const qr = status.data?.qr;
-    if (!qr?.value || status.data?.qrExpired) return null;
-    if (new Date(qr.expiresAt) <= new Date()) return null;
-    return qr.value;
+    if (status.data?.qrExpired) return true;
+    if (!qr?.expiresAt) return false;
+    return new Date(qr.expiresAt) <= new Date();
   }, [status.data]);
 
+  const qrValue = useMemo(() => {
+    const qr = status.data?.qr;
+    if (!qr?.value || expired) return null;
+    return qr.value;
+  }, [status.data, expired]);
+
   const connected = status.data?.status === "connected";
+  const errorCopy = friendlySessionError(status.data?.lastError);
 
   const refreshQr = async () => {
     await api(`/api/v1/sessions/${sessionId}/connect`, { method: "POST" });
@@ -63,13 +71,15 @@ export function QrModal({
             </div>
           ) : (
             <p className="max-w-xs text-center text-sm text-muted">
-              Waiting for QR… use Refresh QR if it stays empty.
+              {expired
+                ? friendlySessionError("QR_EXPIRED")
+                : "Waiting for QR… use Refresh QR if it stays empty."}
             </p>
           )}
         </div>
-        {status.data?.lastError ? (
+        {errorCopy ? (
           <p className="text-sm text-warn" role="alert">
-            {status.data.lastError}
+            {errorCopy}
           </p>
         ) : null}
         <div className="flex gap-2">
