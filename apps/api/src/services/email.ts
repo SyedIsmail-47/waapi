@@ -1,10 +1,10 @@
 import { Worker } from "bullmq";
 import nodemailer from "nodemailer";
 import { QUEUE_EMAIL } from "@waapi/shared";
-import { config } from "../config.js";
+import { config, getPublicAppUrl } from "../config.js";
 import { redis } from "./queues.js";
 
-type EmailJobData = {
+export type EmailJobData = {
   to: string;
   kind?: string;
   token?: string;
@@ -12,28 +12,103 @@ type EmailJobData = {
   text?: string;
 };
 
-function buildMessage(data: EmailJobData): { subject: string; text: string } {
+export type EmailContent = {
+  subject: string;
+  text: string;
+  html: string;
+};
+
+function brandName(): string {
+  return process.env.BRAND_NAME?.trim() || config.BRAND_NAME;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function absoluteLink(path: string, token: string): string {
+  const base = getPublicAppUrl().replace(/\/+$/, "");
+  const url = new URL(path.startsWith("/") ? path : `/${path}`, `${base}/`);
+  url.searchParams.set("token", token);
+  return url.toString();
+}
+
+function wrapHtml(brand: string, title: string, bodyHtml: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>
+<body style="font-family:system-ui,sans-serif;line-height:1.5;color:#111;background:#f6f6f4;padding:24px">
+  <div style="max-width:480px;margin:0 auto;background:#fff;border:1px solid #ddd;padding:24px">
+    <p style="font-size:20px;font-weight:600;margin:0 0 12px">${escapeHtml(brand)}</p>
+    ${bodyHtml}
+  </div>
+</body>
+</html>`;
+}
+
+/** Build subject + text + HTML for a job (exported for unit tests). */
+export function buildEmailContent(data: EmailJobData): EmailContent {
+  const brand = brandName();
+
   if (data.kind === "verify_email" && data.token) {
-    return {
-      subject: `Verify your ${config.BRAND_NAME} email`,
-      text: `Your verification token: ${data.token}\n`,
-    };
+    const link = absoluteLink("/verify-email", data.token);
+    const subject = `Verify your ${brand} email`;
+    const text = [
+      `Verify your email for ${brand}.`,
+      "",
+      `Open this link: ${link}`,
+      "",
+      "If you did not create an account, ignore this message.",
+    ].join("\n");
+    const html = wrapHtml(
+      brand,
+      subject,
+      `<p>Verify your email for ${escapeHtml(brand)}.</p>
+       <p><a href="${escapeHtml(link)}">Verify email</a></p>
+       <p style="color:#666;font-size:13px">Or paste: ${escapeHtml(link)}</p>
+       <p style="color:#666;font-size:13px">If you did not create an account, ignore this message.</p>`,
+    );
+    return { subject, text, html };
   }
+
   if (data.kind === "reset_password" && data.token) {
-    return {
-      subject: `Reset your ${config.BRAND_NAME} password`,
-      text: `Your password reset token: ${data.token}\n`,
-    };
+    const link = absoluteLink("/reset-password", data.token);
+    const subject = `Reset your ${brand} password`;
+    const text = [
+      `Reset your ${brand} password.`,
+      "",
+      `Open this link: ${link}`,
+      "",
+      "If you did not request a reset, ignore this message.",
+    ].join("\n");
+    const html = wrapHtml(
+      brand,
+      subject,
+      `<p>Reset your ${escapeHtml(brand)} password.</p>
+       <p><a href="${escapeHtml(link)}">Reset password</a></p>
+       <p style="color:#666;font-size:13px">Or paste: ${escapeHtml(link)}</p>
+       <p style="color:#666;font-size:13px">If you did not request a reset, ignore this message.</p>`,
+    );
+    return { subject, text, html };
   }
+
+  const subject = data.subject ?? `${brand} notification`;
+  const text = data.text ?? "";
   return {
-    subject: data.subject ?? `${config.BRAND_NAME} notification`,
-    text: data.text ?? "",
+    subject,
+    text,
+    html: wrapHtml(brand, subject, `<pre style="white-space:pre-wrap">${escapeHtml(text)}</pre>`),
   };
 }
 
-async function deliver(data: EmailJobData): Promise<void> {
+/** Deliver one email (exported for unit tests / resend mock). */
+export async function deliverEmail(data: EmailJobData): Promise<void> {
   const from = config.EMAIL_FROM ?? `noreply@${config.brand.slug}.local`;
-  const message = buildMessage(data);
+  const message = buildEmailContent(data);
 
   if (config.EMAIL_DRIVER === "console") {
     if (config.NODE_ENV === "production") {
@@ -41,7 +116,18 @@ async function deliver(data: EmailJobData): Promise<void> {
     }
     const safe = { ...data } as Record<string, unknown>;
     if (typeof safe.token === "string") safe.token = "[redacted]";
-    console.log(JSON.stringify({ service: "email", template: data.kind, ...safe, ...message }));
+    console.log(
+      JSON.stringify({
+        service: "email",
+        template: data.kind,
+        to: data.to,
+        subject: message.subject,
+        // Never log full bodies (contain tokens in links) in console driver summary.
+        textChars: message.text.length,
+        htmlChars: message.html.length,
+        ...safe,
+      }),
+    );
     return;
   }
 
@@ -57,6 +143,7 @@ async function deliver(data: EmailJobData): Promise<void> {
         to: [data.to],
         subject: message.subject,
         text: message.text,
+        html: message.html,
       }),
     });
     if (!res.ok) {
@@ -74,6 +161,7 @@ async function deliver(data: EmailJobData): Promise<void> {
       to: data.to,
       subject: message.subject,
       text: message.text,
+      html: message.html,
     });
     return;
   }
@@ -85,7 +173,7 @@ export function startEmailWorker(): Worker {
   return new Worker(
     QUEUE_EMAIL,
     async (job) => {
-      await deliver(job.data as EmailJobData);
+      await deliverEmail(job.data as EmailJobData);
     },
     {
       connection: redis,

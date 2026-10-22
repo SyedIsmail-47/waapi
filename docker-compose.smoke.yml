@@ -29,6 +29,7 @@ services:
       TURNSTILE_DISABLED: "true"
       # E2e signup without minting invites; production default remains invite.
       SIGNUPS_MODE: open
+      PUBLIC_APP_URL: http://127.0.0.1:8080
       GLOBAL_MAX_SESSIONS: ${GLOBAL_MAX_SESSIONS:-100}
       DEFAULT_ACCOUNT_MAX_SESSIONS: ${DEFAULT_ACCOUNT_MAX_SESSIONS:-1}
     depends_on:
