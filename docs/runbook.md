@@ -54,6 +54,21 @@ curl -sS -X POST "http://127.0.0.1:3001/internal/admin/invites" \
 
 Smoke overlay sets `SIGNUPS_MODE=open` so Playwright can register without invites.
 
+### Admin CLI (Phase 4 WP-G)
+
+Internal only (`INTERNAL_BASE_URL` + `ADMIN_API_SECRET`). Actions are audit-logged; no message bodies.
+
+```bash
+pnpm admin -- find-user --q user@example.com
+pnpm admin -- suspend --account <uuid>
+pnpm admin -- unsuspend --account <uuid>
+pnpm admin -- set-plan --account <uuid> --plan starter
+pnpm admin -- revoke-keys --account <uuid>
+pnpm admin -- force-logout --session <uuid>
+pnpm admin -- failing-webhooks
+pnpm admin -- create-invite --hours 168
+```
+
 ### Billing (Phase 4 WP-F)
 
 - Design: `docs/design/billing.md`. Default `BILLING_PROVIDER=manual`, `TRIAL_DAYS=3`.
