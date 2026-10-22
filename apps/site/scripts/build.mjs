@@ -15,7 +15,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const siteRoot = resolve(__dirname, "..");
-const dist = resolve(siteRoot, "dist");
+const dist = resolve(siteRoot, process.env.SITE_DIST?.trim() || "dist");
 
 const brand = (process.env.BRAND_NAME?.trim() || BRAND_NAME_FALLBACK);
 const legalName = process.env.LEGAL_NAME?.trim() || "LEGAL_NAME";
@@ -23,6 +23,53 @@ const legalAddress = process.env.LEGAL_ADDRESS?.trim() || "[registered address]"
 const merchantOfRecord = process.env.MERCHANT_OF_RECORD === "true";
 const appUrl = (process.env.PUBLIC_APP_URL?.trim() || "https://app.example.com").replace(/\/$/, "");
 const contactEmail = process.env.CONTACT_EMAIL?.trim() || "support@example.com";
+const strictLegal =
+  process.env.NODE_ENV === "production" || merchantOfRecord;
+
+function assertNoPlaceholders() {
+  if (!strictLegal) return;
+  const errors = [];
+  if (!legalName || legalName === "LEGAL_NAME" || /^\[.*\]$/.test(legalName)) {
+    errors.push("LEGAL_NAME is a placeholder");
+  }
+  if (
+    !legalAddress ||
+    legalAddress.includes("[registered") ||
+    legalAddress === "LEGAL_ADDRESS"
+  ) {
+    errors.push("LEGAL_ADDRESS is a placeholder");
+  }
+  if (
+    !contactEmail ||
+    contactEmail === "support@example.com" ||
+    /@example\.(com|test|org)$/i.test(contactEmail)
+  ) {
+    errors.push("CONTACT_EMAIL is a placeholder");
+  }
+  for (const code of PUBLIC_PLAN_CODES) {
+    const envKey = `PLAN_PRICE_${code.toUpperCase()}`;
+    const label = planPriceLabel(code).trim();
+    if (
+      !label ||
+      /contact support|tbd|todo|placeholder|\$0\b/i.test(label)
+    ) {
+      errors.push(`${envKey} / ${code} price is a placeholder (set ${envKey})`);
+    }
+  }
+  if (errors.length) {
+    console.error("site build blocked (production/MOR legal guard):");
+    for (const e of errors) console.error(` - ${e}`);
+    process.exit(1);
+  }
+}
+assertNoPlaceholders();
+
+/** Resolve public plan price labels (env override for production). */
+function planPriceLabel(code) {
+  const envKey = `PLAN_PRICE_${code.toUpperCase()}`;
+  const fromEnv = process.env[envKey]?.trim();
+  return fromEnv || PLANS[code].priceLabel;
+}
 
 const nav = [
   ["Home", "/"],
@@ -119,7 +166,7 @@ function pagePricing() {
     const p = PLANS[code];
     return `<article class="border border-line bg-panel p-5">
       <h2 class="text-xl font-semibold">${esc(p.name)}</h2>
-      <p class="mt-1 text-muted">${esc(p.priceLabel)}</p>
+      <p class="mt-1 text-muted">${esc(planPriceLabel(code))}</p>
       <ul class="mt-4 space-y-1 text-sm text-muted">
         <li>${p.maxSessions} session${p.maxSessions === 1 ? "" : "s"}</li>
         <li>${p.sendsPerDay.toLocaleString()} sends / day</li>

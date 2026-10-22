@@ -16,3 +16,9 @@ drizzle/meta/*_snapshot.json
 !drizzle/meta/_journal.json
 
 apps/site/dist
+apps/site/dist-test-*
+
+# Read-only review packs (full source dumps; never commit)
+review-pack-1.md
+review-pack-2.md
+**/review-pack-*.md

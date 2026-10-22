@@ -12,7 +12,7 @@ describe("WP-M(b) nginx security headers & blocks", () => {
     expect(edge).toMatch(/Content-Security-Policy/i);
     expect(edge).toMatch(/challenges\.cloudflare\.com/);
     expect(edge).toMatch(/script-src[^;]*'self'/);
-    expect(edge).toMatch(/X-Content-Type-Options\s+nosniff/i);
+    expect(edge).toMatch(/X-Content-Type-Options\s+"?nosniff"?/i);
     expect(edge).toMatch(/Referrer-Policy/i);
     expect(edge).toMatch(/frame-ancestors\s+'?none'?/i);
     expect(edge).toMatch(/client_max_body_size/);

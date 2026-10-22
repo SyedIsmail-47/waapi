@@ -108,14 +108,20 @@ export function runPreflight(env: NodeJS.ProcessEnv = process.env): PreflightRes
     errors.push("JWT_SECRET must be at least 32 characters");
   }
 
-  if (env.DEV_RETURN_TOKENS === "true" && env.SMOKE_MODE !== "true") {
+  if (env.SMOKE_MODE === "true" || env.SMOKE_MODE === "1") {
+    errors.push("SMOKE_MODE must be false in production");
+  }
+  if (env.TURNSTILE_DISABLED === "true" || env.TURNSTILE_DISABLED === "1") {
+    errors.push("TURNSTILE_DISABLED must be false in production");
+  }
+  if (env.DEV_RETURN_TOKENS === "true" || env.DEV_RETURN_TOKENS === "1") {
     errors.push("DEV_RETURN_TOKENS must be false in production");
   }
-  if (env.ALLOW_HTTP_WEBHOOKS === "true") {
+  if (env.ALLOW_HTTP_WEBHOOKS === "true" || env.ALLOW_HTTP_WEBHOOKS === "1") {
     errors.push("ALLOW_HTTP_WEBHOOKS must be false in production");
   }
-  if (env.WA_DRIVER === "fake" && env.SMOKE_MODE !== "true") {
-    errors.push("WA_DRIVER=fake is forbidden outside SMOKE_MODE");
+  if (env.WA_DRIVER === "fake") {
+    errors.push("WA_DRIVER=fake is forbidden in production");
   }
 
   return { ok: errors.length === 0, errors: [...new Set(errors)] };

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 const siteRoot = resolve(root, "apps/site");
-const dist = resolve(siteRoot, "dist");
+const dist = resolve(siteRoot, "dist-test-wpj");
 
 const PAGES = ["", "pricing", "docs", "terms", "privacy", "refund", "aup", "contact"] as const;
 
@@ -20,12 +20,18 @@ describe("WP-J public site build", () => {
         cwd: root,
         env: {
           ...process.env,
+          SITE_DIST: "dist-test-wpj",
+          NODE_ENV: "development",
           BRAND_NAME: "waapi",
           LEGAL_NAME: "LEGAL_NAME",
           LEGAL_ADDRESS: "[registered address]",
           MERCHANT_OF_RECORD: "false",
           PUBLIC_APP_URL: "https://app.example.com",
           CONTACT_EMAIL: "support@example.com",
+          // clear price overrides from other parallel tests
+          PLAN_PRICE_STARTER: "",
+          PLAN_PRICE_PRO: "",
+          PLAN_PRICE_ENTERPRISE: "",
         },
         stdio: "pipe",
         shell: process.platform === "win32",
@@ -54,7 +60,8 @@ describe("WP-J public site build", () => {
   });
 
   it("includes merchant-of-record clause when MERCHANT_OF_RECORD=true", () => {
-    rmSync(dist, { recursive: true, force: true });
+    const morDist = resolve(siteRoot, "dist-test-mor");
+    rmSync(morDist, { recursive: true, force: true });
     execFileSync(
       process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["--filter", "@waapi/site", "build"],
@@ -62,18 +69,23 @@ describe("WP-J public site build", () => {
         cwd: root,
         env: {
           ...process.env,
+          SITE_DIST: "dist-test-mor",
+          NODE_ENV: "development",
           BRAND_NAME: "waapi",
           LEGAL_NAME: "Acme Legal LLC",
           LEGAL_ADDRESS: "1 Main St",
           MERCHANT_OF_RECORD: "true",
-          PUBLIC_APP_URL: "https://app.example.com",
-          CONTACT_EMAIL: "support@example.com",
+          PUBLIC_APP_URL: "https://app.acme-legal.test",
+          CONTACT_EMAIL: "support@acme-legal.test",
+          PLAN_PRICE_STARTER: "$29/mo",
+          PLAN_PRICE_PRO: "$99/mo",
+          PLAN_PRICE_ENTERPRISE: "Custom",
         },
         stdio: "pipe",
         shell: process.platform === "win32",
       },
     );
-    const terms = readFileSync(resolve(dist, "terms", "index.html"), "utf8");
+    const terms = readFileSync(resolve(morDist, "terms", "index.html"), "utf8");
     expect(terms).toMatch(/merchant of record/i);
   });
 });

@@ -24,15 +24,19 @@ NODE_ENV=production pnpm preflight
 # or load .env.production then: pnpm preflight
 ```
 
-2. **Encrypted backups** — `pg_dump` → gzip → AES-256-CBC (PBKDF2) to off-box storage:
+2. **Encrypted backups (`age`)** — `pg_dump` → gzip → **age public-key** → `.sha256` → **rclone** to S3-compatible storage.
+
+**Key custody:** generate an age keypair **offline**. Put only the **public** recipient (`age1…`) on the backup server (`AGE_RECIPIENTS` / `AGE_RECIPIENTS_FILE`). Keep the **private identity** off the server (password manager / HSM / sealed USB). Restore hosts alone mount `AGE_IDENTITY`. Use **write-only** rclone credentials on the backup host (no delete/list if the provider allows).
 
 ```bash
-export DATABASE_URL=...          # not echoed by the script
-export BACKUP_DEST=/mnt/offbox/waapi
-export BACKUP_PASSPHRASE_FILE=/root/.waapi-backup-pass
+export DATABASE_URL=...   # not echoed
+export AGE_RECIPIENTS=age1...
+export BACKUP_DEST=/var/backups/waapi
+export BACKUP_RCLONE_REMOTE=b2:waapi-backups   # write-only remote
 ./scripts/backup-pg.sh
-# Restore to staging only:
-./scripts/restore-pg.sh --input /mnt/offbox/waapi/waapi-....sql.gz.enc
+# Restore on a scratch host that has the private identity:
+AGE_IDENTITY=/secure/age-identity.txt \
+  ./scripts/restore-pg.sh --input waapi-....sql.gz.age
 ```
 
 3. **nginx + Cloudflare Origin CA** — `deploy/nginx.conf` expects `/etc/ssl/cloudflare/origin.pem` + `origin.key`. Firewall 443 to Cloudflare IPs only; set `TRUST_CLOUDFLARE=true` when the proxy is live.

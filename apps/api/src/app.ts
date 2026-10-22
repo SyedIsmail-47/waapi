@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -9,6 +9,7 @@ import {
   validatorCompiler,
 } from "fastify-type-provider-zod";
 import { config } from "./config.js";
+import { defaultPinoRedact } from "./lib/log-redact.js";
 import authPlugin from "./plugins/auth.js";
 import errorHandler from "./plugins/error-handler.js";
 import rateLimit from "./plugins/rate-limit.js";
@@ -31,6 +32,11 @@ export type BuiltApp = FastifyInstance & {
   registeredRoutes: Array<{ method: string; url: string }>;
 };
 
+export type BuildAppOptions = {
+  /** Override Fastify logger (tests capture streams / custom redact). */
+  logger?: FastifyServerOptions["logger"];
+};
+
 function corsOriginConfig(): boolean | string[] | ((origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => void) {
   // Default: no browser CORS (API clients / same-origin gateway).
   // Set CORS_ORIGINS to a comma-separated allowlist when a dashboard origin needs access.
@@ -43,14 +49,22 @@ function corsOriginConfig(): boolean | string[] | ((origin: string | undefined, 
   return list;
 }
 
-export async function buildApp(): Promise<BuiltApp> {
+function defaultLogger(): FastifyServerOptions["logger"] {
+  const base = {
+    level: config.LOG_LEVEL,
+    redact: defaultPinoRedact,
+  };
+  if (config.NODE_ENV === "development") {
+    return { ...base, transport: { target: "pino-pretty" } };
+  }
+  return base;
+}
+
+export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
   const app = Fastify({
     // Numeric hop count (default 1). Boolean `true` would trust the entire chain.
     trustProxy: config.TRUST_PROXY_HOPS as unknown as boolean,
-    logger:
-      config.NODE_ENV === "development"
-        ? { level: config.LOG_LEVEL, transport: { target: "pino-pretty" } }
-        : { level: config.LOG_LEVEL },
+    logger: opts.logger ?? defaultLogger(),
     genReqId: (request) => {
       const supplied = request.headers["x-request-id"];
       return typeof supplied === "string" && supplied.length <= 128
@@ -138,7 +152,7 @@ export async function buildInternalApp(
   database: ReturnType<typeof createDb>,
 ): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: { level: config.LOG_LEVEL },
+    logger: { level: config.LOG_LEVEL, redact: defaultPinoRedact },
     trustProxy: false,
   });
   app.decorate("database", database);
